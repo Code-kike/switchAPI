@@ -1,0 +1,14 @@
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/design.md", "reason": "权威技术方案 v2（含全部研究结论回写）——数据模型/接口面/Agent 设计/关键流程"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/prd.md", "reason": "父任务 PRD：范围四象限与 MVP 验收标准"}
+{"file": "CONTEXT.md", "reason": "领域术语表——代码命名必须一致（Provider/App/Switch/Hub/Agent/配对/备选序列等）"}
+{"file": "docs/adr/0002-same-format-passthrough.md", "reason": "转发器硬约束：同格式直通，仅换鉴权头+可选模型名重定向"}
+{"file": "docs/adr/0003-sqlite-over-postgres-redis.md", "reason": "存储约束：modernc SQLite 无 CGO 单文件"}
+{"file": "docs/adr/0005-lan-first-security-posture.md", "reason": "安全边界：密钥 AES-GCM 落库、Agent 仅 127.0.0.1、token 哈希存储"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/01-cc-local-proxy-config.md", "reason": "appconfig CC 侧规格：env 两键、双头鉴权、手术合并、冲突清单 C8"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/02-codex-config.md", "reason": "appconfig Codex 侧规格：config.toml 供应商块、auth.json 载体、需重启提示、/responses+/models 路由"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/06-go-sse-passthrough.md", "reason": "转发器实现细则：Rewrite 钩子、条件超时、Accept-Encoding identity、模型重定向边界（原型在 06-sse-prototype/）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/08-health-thresholds.md", "reason": "转发器四个超时旋钮取值（connect 10s/TTFB 60s stream-only/空闲 120s/非流式总 300s）"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范层索引"}
+{"file": ".trellis/spec/backend/directory-structure.md", "reason": "目录结构规范"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误处理规范"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Hub↔Agent 跨层数据流检查"}

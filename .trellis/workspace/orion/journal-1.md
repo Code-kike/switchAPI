@@ -17,5 +17,17 @@
 - M0 完成（2026-07-04）：design.md v2 全面回写研究结论（provider_health 表、usage_source 列、pricing_base 扩列、probe_cmd/probe_result 消息、负证据否决仲裁、cookie Max-Age/非 Secure、externalBin 仅分发等）；prd.md 验收#7 改写（可映射全导入+跳过报告）、§6 标记 8/8 完成；implement.md M0 全勾；CONTEXT.md 新增术语 冷却/恢复探测。
 - 下一步：等用户确认——是否 git commit M0 checkpoint；是否建 M1 子任务（任务创建需用户同意）开工数据与转发内核。
 
+## 2026-07-04 — M1 数据与转发内核完成（任务 07-04-m1-data-forwarding）
+
+- 用户批准 commit + 建 M1 子任务。M0 commit=24f8b7a（147 文件）；push 被凭据挡（PAT 缺 workflow scope、gh token 失效——待用户修复后补推）。
+- M1 全部代码由主会话直接实现（W1/W2 共 4 次子代理派发全部 429 秒杀，anyrouter 持续拒绝子代理会话；本会话 API 正常——疑与并发/新会话建立有关）。
+- 交付：shared/{wire,cryptoutil}、hub/{store(10 表迁移+DAO),api(auth 引导式首登/CRUD/switch/配对/事件),realtime(ws/agent+CloseAll)}、agent/{forward(原型演化+动态路由),hubclient(退避重连+0600 快照),appconfig(CC/Codex 接管 dry-run/备份/回滚),cli(kardianos)}、internal/e2e。
+- 实现决策偏差（已回写 design.md）：anthropic 上游注入双头齐发（apiKeyHelper 官方先例），弃 per-provider AuthStyle。
+- e2e 发现并修复真实缺口：http.Server.Shutdown 不关 hijacked WS → realtime.CloseAll() 接入优雅退出。
+- 全绿：9 包 test + forward/e2e race + gofmt + 真实配置 dry-run 验收（正确 diff/脱敏/冲突警告/零写入）。
+- 遗留：两台机器手动验收（待部署）；spec/backend 回填；push 补推。M2 未开工。
+
+---
+
 ---
 

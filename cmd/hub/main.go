@@ -1,25 +1,101 @@
 // switchapi-hub —— 中心服务（Hub）入口。
 //
-// M0 骨架：仅支持 --version 与一行启动占位输出；
-// 真实服务逻辑（存储、切换裁决、配置分发、Web 托管）自 M1 起实现。
+// 职责（父 design.md §2/§3）：权威 SQLite、REST API、ws/agent 配置分发。
+// Web UI 托管与 ws/ui 在 M3 接入；统计聚合在 M2。
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
 	"fmt"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"syscall"
+	"time"
 
+	"github.com/Code-kike/switchAPI/internal/hub/api"
+	"github.com/Code-kike/switchAPI/internal/hub/realtime"
+	"github.com/Code-kike/switchAPI/internal/hub/store"
+	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 	"github.com/Code-kike/switchAPI/internal/shared/version"
 )
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
+	listen := flag.String("listen", ":8080", "HTTP 监听地址")
+	dataDir := flag.String("data", "", "数据目录（默认 ~/.switchapi-hub）")
 	flag.Parse()
 
 	if *showVersion {
 		fmt.Println("switchapi-hub " + version.Version)
 		return
 	}
+	if err := run(*listen, *dataDir); err != nil {
+		log.Fatal(err)
+	}
+}
 
-	// M0 启动占位：说明当前二进制尚无服务能力，避免误以为 Hub 已在运行。
-	fmt.Println("switchapi-hub " + version.Version + "：M0 骨架占位，服务逻辑将在 M1 实现")
+func run(listen, dataDir string) error {
+	if dataDir == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("无法确定用户目录，请用 -data 指定数据目录: %w", err)
+		}
+		dataDir = filepath.Join(home, ".switchapi-hub")
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return err
+	}
+
+	st, err := store.Open(filepath.Join(dataDir, "hub.db"))
+	if err != nil {
+		return fmt.Errorf("打开数据库失败: %w", err)
+	}
+	defer st.Close()
+
+	masterKey, err := cryptoutil.LoadOrCreateMasterKey(filepath.Join(dataDir, "master.key"))
+	if err != nil {
+		return fmt.Errorf("主密钥加载失败: %w", err)
+	}
+
+	rt := realtime.New(st, masterKey)
+	apiSrv := api.New(st, masterKey, rt)
+
+	root := http.NewServeMux()
+	root.Handle("GET /api/v1/ws/agent", rt.Handler())
+	root.Handle("/", apiSrv.Handler())
+
+	srv := &http.Server{
+		Addr:              listen,
+		Handler:           root,
+		ReadHeaderTimeout: 5 * time.Second,
+		// WriteTimeout 保持 0：WS 长连接与未来的 SSE 都不能被写超时切断。
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	errCh := make(chan error, 1)
+	go func() {
+		log.Printf("switchapi-hub %s 启动：listen=%s data=%s", version.Version, listen, dataDir)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-ctx.Done():
+		log.Println("收到退出信号，优雅关闭中…")
+		rt.CloseAll() // WS 为 hijacked 连接，Shutdown 不会关它们
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		srv.Shutdown(shutdownCtx)
+	}
+	return nil
 }

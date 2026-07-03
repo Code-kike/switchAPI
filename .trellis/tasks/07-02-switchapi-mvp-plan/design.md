@@ -88,7 +88,8 @@ REST（`/api/v1`，Session Cookie 鉴权，argon2id 密码）：
   可回滚卸载。安装时冲突检查清单：apiKeyHelper、CLAUDE_CODE_USE_BEDROCK/VERTEX、shell 层 ANTHROPIC_*
   export、HTTP(S)_PROXY 需 NO_PROXY 含 127.0.0.1（细则见 research/01 C8）。
 - **鉴权链**：校验本地 token——同时接受 `Authorization: Bearer` 与 `x-api-key` 两种头（CC 按 env 变量二选一，
-  apiKeyHelper 双头齐发）→ 剥离 → 按协议注入上游（anthropic 默认 x-api-key、可按预设选 Bearer；openai: Bearer）。（研究#1 C2/C8）
+  apiKeyHelper 双头齐发）→ 剥离 → 按协议注入上游（anthropic **双头齐发**——与 CC 处理 apiKeyHelper 值
+  的官方行为一致，兼容面最大；openai 仅 Bearer）。（研究#1 C2/C8；M1 已实现）
 - **转发器**（研究#6，原型 research/06-sse-prototype 已对真实中转站实测通过）：
   `httputil.ReverseProxy` + **Rewrite 钩子**（Director 已废弃）+ `FlushInterval:-1`；
   Transport = DefaultTransport.Clone() + `DisableCompression=true` + **上游强制 `Accept-Encoding: identity`**

@@ -1,0 +1,8 @@
+{"file": ".trellis/tasks/07-04-m1-data-forwarding/prd.md", "reason": "M1 验收标准逐条核对基准"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/design.md", "reason": "实现与权威设计（数据模型/接口面/流程）的符合性"}
+{"file": "CONTEXT.md", "reason": "术语一致性：代码/API/错误信息命名不得偏离术语表"}
+{"file": "docs/adr/0002-same-format-passthrough.md", "reason": "检查转发未引入跨协议转换、透传字节一致（模型重定向除外）"}
+{"file": "docs/adr/0005-lan-first-security-posture.md", "reason": "安全红线：密钥不明文落盘、Agent 仅 127.0.0.1、token 哈希、状态文件 0600"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端质量规范"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误处理规范符合性"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "Hub↔Agent 跨层联动完整性检查"}
