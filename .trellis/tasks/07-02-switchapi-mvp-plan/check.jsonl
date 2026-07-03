@@ -1,0 +1,5 @@
+{"file": "CONTEXT.md", "reason": "术语一致性检查基准——代码/UI 文案/文档命名不得偏离术语表"}
+{"file": "docs/adr/0002-same-format-passthrough.md", "reason": "检查转发实现未引入跨协议转换、未改动透传字节（model 重定向除外）"}
+{"file": "docs/adr/0005-lan-first-security-posture.md", "reason": "检查安全红线：密钥不明文落盘、Agent 仅监听 127.0.0.1、含密钥导出强制口令加密"}
+{"file": ".trellis/spec/guides/cross-layer-thinking-guide.md", "reason": "跨层数据流检查清单（Agent↔Hub↔UI 三层联动改动时使用）"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "前端规范层索引（双端 UI 检查时查阅）"}

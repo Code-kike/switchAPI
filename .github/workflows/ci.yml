@@ -1,0 +1,48 @@
+# CI：vet + test + 三平台交叉编译（linux/darwin/windows × amd64/arm64，CGO_ENABLED=0）。
+# 目标与 Makefile 的 vet/test/cross 保持一致；golangci-lint 配置落地前以 go vet 为准。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test ./...
+
+  cross-compile:
+    needs: check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [linux, darwin, windows]
+        goarch: [amd64, arm64]
+    env:
+      CGO_ENABLED: "0"
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: build hub + agent
+        run: |
+          ext=""
+          [ "$GOOS" = "windows" ] && ext=".exe"
+          go build -trimpath -o "dist/$GOOS-$GOARCH/switchapi-hub$ext" ./cmd/hub
+          go build -trimpath -o "dist/$GOOS-$GOARCH/switchapi-agent$ext" ./cmd/agent

@@ -1,0 +1,16 @@
+{"file": "CONTEXT.md", "reason": "领域术语表——代码命名与文档表述必须与之一致（Provider/App/Switch/Hub/Agent 等）"}
+{"file": "docs/adr/0001-single-user-agent-hub-architecture.md", "reason": "核心架构：Agent 在请求路径直连供应商 + Hub 中心汇聚，组件职责边界"}
+{"file": "docs/adr/0002-same-format-passthrough.md", "reason": "转发器硬约束：同格式直通，禁止跨协议转换"}
+{"file": "docs/adr/0003-sqlite-over-postgres-redis.md", "reason": "存储选型：单文件 SQLite（modernc 无 CGO），备份=快照一个文件"}
+{"file": "docs/adr/0004-go-react-tauri-stack.md", "reason": "技术栈与仓库形态：Go 双二进制 monorepo + React SPA + Tauri 2"}
+{"file": "docs/adr/0005-lan-first-security-posture.md", "reason": "安全边界：内网优先、密钥 AES-GCM 落库、配对 token、Agent 仅监听 127.0.0.1"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/01-cc-local-proxy-config.md", "reason": "CC 接管规格：settings.json env 写法、双头鉴权、热生效实锤、appconfig 冲突检查清单（M1 appconfig 必读）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/02-codex-config.md", "reason": "Codex 接管规格：config.toml+auth.json 写法、wire_api 只剩 responses、本地 token 载体=auth.json（M1 appconfig 必读）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/03-usage-parsing-points.md", "reason": "三协议 usage 采集点与四分项映射表、累计语义、中断矩阵、OpenAI cached 减法规则（M2 统计必读）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/04-litellm-pricing.md", "reason": "LiteLLM 价格表字段映射、mode IN (chat,responses)、upsert-only 同步、ETag 条件请求、4 步模型名匹配（M2 计价必读）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/05-cc-switch-format.md", "reason": "cc-switch SQLite 格式、字段映射表、9 项 drop-list、E1-E9 边界（M4 importer 必读）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/06-go-sse-passthrough.md", "reason": "转发器实现要点：Rewrite 钩子、FlushInterval=-1、Accept-Encoding identity、O(1) tee、真实中转站实测通过（M1 转发器必读，原型代码在 06-sse-prototype/）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/07-tauri-agent-distribution.md", "reason": "桌面壳分发方案：externalBin 仅作分发、首启复制+agent install、cookie Max-Age/非 Secure、远程 Hub URL capability（M3 必读）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/08-health-thresholds.md", "reason": "健康判定参数表：连续硬失败×3、四级失败分类、负证据否决仲裁、冷却退避、恢复探测（M4 故障切换必读）"}
+{"file": ".trellis/spec/guides/index.md", "reason": "编码前思维指南索引（跨层数据流/代码复用）"}
+{"file": ".trellis/spec/backend/index.md", "reason": "后端规范层索引（M0 骨架定型后回填，实现时按需查阅）"}
