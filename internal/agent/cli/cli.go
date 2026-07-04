@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/Code-kike/switchAPI/internal/agent/appconfig"
 	"github.com/Code-kike/switchAPI/internal/agent/forward"
 	"github.com/Code-kike/switchAPI/internal/agent/hubclient"
+	"github.com/Code-kike/switchAPI/internal/agent/usagebuf"
 	"github.com/kardianos/service"
 )
 
@@ -155,10 +157,12 @@ func configCmd(args []string) int {
 type program struct {
 	listen    string
 	statePath string
+	dbPath    string
 	state     *hubclient.State
 
 	cancel context.CancelFunc
 	srv    *http.Server
+	buf    *usagebuf.Queue
 	done   chan struct{}
 }
 
@@ -167,8 +171,22 @@ func (p *program) Start(_ service.Service) error {
 	p.cancel = cancel
 	p.done = make(chan struct{})
 
-	fwd := forward.New(p.state.LocalToken, nil) // usage sink 挂点留待 M2
+	// Usage buffer: parsed usage is enqueued here (non-blocking) and pumped to
+	// the Hub by the client. If it can't be opened, forwarding still proceeds —
+	// usage reporting is best-effort relative to the proxy staying up.
+	var sink forward.UsageSink
+	if buf, err := usagebuf.Open(p.dbPath); err != nil {
+		log.Printf("usagebuf 打开失败，用量上报本次禁用: %v", err)
+	} else {
+		p.buf = buf
+		sink = func(u forward.Usage) { buf.Enqueue(u.ToRecord()) }
+	}
+
+	fwd := forward.New(p.state.LocalToken, sink)
 	client := hubclient.New(p.statePath, p.state, fwd)
+	if p.buf != nil {
+		client.UseQueue(p.buf)
+	}
 	go client.Run(ctx)
 
 	p.srv = &http.Server{
@@ -196,6 +214,9 @@ func (p *program) Stop(_ service.Service) error {
 	case <-p.done:
 	case <-time.After(6 * time.Second):
 	}
+	if p.buf != nil {
+		p.buf.Close()
+	}
 	return nil
 }
 
@@ -220,7 +241,8 @@ func runCmd(args []string) int {
 		return 1
 	}
 
-	prg := &program{listen: *listen, statePath: *statePath, state: st}
+	prg := &program{listen: *listen, statePath: *statePath,
+		dbPath: filepath.Join(filepath.Dir(*statePath), "agent.db"), state: st}
 	svc, err := service.New(prg, svcConfig())
 	if err != nil {
 		fmt.Println(err)

@@ -27,6 +27,21 @@
 - 全绿：9 包 test + forward/e2e race + gofmt + 真实配置 dry-run 验收（正确 diff/脱敏/冲突警告/零写入）。
 - 遗留：两台机器手动验收（待部署）；spec/backend 回填；push 补推。M2 未开工。
 
+## 2026-07-04（下） — push 补推 + M2 统计与计价完成（任务 07-04-m2-stats-pricing）
+
+- 用户修好凭据：M0+M1 已推 GitHub，CI 三平台首跑 success（run 28691757544）。
+- M2 组织：W0 主会话固化 wire 契约（UsageRecord/Batch/Ack）+ LiteLLM 快照过滤嵌入（2204 模型/355KB）；
+  W-A/W-B 两子代理并行**均一次全绿**（中转站已恢复）——W-A: 双协议解析/usagebuf 队列/hubclient 单 writer；
+  W-B: 入库去重/计价引擎（四步匹配+三层结算+ETag 同步）/stats API。
+- 跨代理契约协调：W-A 定义 Model=请求名、ModelRedirected=重定向目标 → 主会话转发给 W-B →
+  W-B 全链路按 effectiveModel 分组计价；W-C 补齐 model= 筛选口径。
+- W-C（主会话）：e2e 扩展验证断连补报无重无漏 + 真实快照费用结算；修 e2e fake 不回显模型的测试缺陷。
+- flake 记录：TestSwapMidStreamAtomic 44 次运行 1 次负载敏感偶发（closed network connection@tidy 峰值），
+  无法复现，不掩盖，观察 CI。
+- 遗留：跑一天真实对账验收（部署后）；M3 双端体验未开工。
+
+---
+
 ---
 
 ---

@@ -10,7 +10,8 @@ const (
 	TypeHello      = "hello"
 	TypeConfigPush = "config_push"
 	TypeHeartbeat  = "heartbeat"
-	TypeUsageBatch = "usage_batch" // reserved for M2
+	TypeUsageBatch = "usage_batch" // Agent → Hub：用量批量上报
+	TypeUsageAck   = "usage_ack"   // Hub → Agent：确认落库，Agent 删本地队列
 )
 
 // Envelope is the outer frame of every WS message.
@@ -76,7 +77,37 @@ type ConfigPush struct {
 	FallbackOrders map[string][]string `json:"fallback_orders"` // app → provider ids（M4 本地临时降级用）
 }
 
-// UsageBatch is a placeholder for the M2 usage pipeline.
+// UsageRecord is one metered request as the Agent reports it — pure metadata,
+// NEVER message content (CONTEXT.md: 用量记录). Field semantics follow
+// research/03: input excludes cache reads; cache_write is anthropic-only;
+// output includes reasoning. device_id is attributed by the Hub from the
+// reporting connection, not trusted from the Agent.
+type UsageRecord struct {
+	RequestID        string `json:"request_id"` // Agent 生成的 uuid，幂等去重键
+	TS               int64  `json:"ts"`         // unix 秒，请求开始时刻
+	App              string `json:"app"`        // claude-code | codex（由路由前缀推导）
+	ProviderID       string `json:"provider_id"`
+	Model            string `json:"model"`
+	ModelRedirected  string `json:"model_redirected,omitempty"` // 重定向后的模型名（未重定向为空）
+	InputTokens      int64  `json:"input_tokens"`
+	OutputTokens     int64  `json:"output_tokens"`
+	CacheWriteTokens int64  `json:"cache_write_tokens"`
+	CacheReadTokens  int64  `json:"cache_read_tokens"`
+	DurationMS       int64  `json:"duration_ms"`
+	Status           int    `json:"status"`
+	ErrorKind        string `json:"error_kind,omitempty"`
+	UsageSource      string `json:"usage_source"` // wire | estimated | none
+}
+
+// UsageBatch carries pending records upstream; at-least-once — the Hub
+// deduplicates on request_id and acknowledges by batch_id.
 type UsageBatch struct {
-	Records []json.RawMessage `json:"records"`
+	BatchID string        `json:"batch_id"`
+	Records []UsageRecord `json:"records"`
+}
+
+// UsageAck confirms a batch landed (or was deduplicated) so the Agent can
+// drop it from the local queue.
+type UsageAck struct {
+	BatchID string `json:"batch_id"`
 }

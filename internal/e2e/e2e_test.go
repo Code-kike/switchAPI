@@ -23,7 +23,9 @@ import (
 
 	"github.com/Code-kike/switchAPI/internal/agent/forward"
 	"github.com/Code-kike/switchAPI/internal/agent/hubclient"
+	"github.com/Code-kike/switchAPI/internal/agent/usagebuf"
 	"github.com/Code-kike/switchAPI/internal/hub/api"
+	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/realtime"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
@@ -39,7 +41,11 @@ type fakeUpstream struct {
 }
 
 func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	io.Copy(io.Discard, r.Body)
+	body, _ := io.ReadAll(r.Body)
+	var req struct {
+		Model string `json:"model"`
+	}
+	json.Unmarshal(body, &req)
 	f.mu.Lock()
 	f.hits++
 	f.auth = r.Header.Get("X-Api-Key")
@@ -48,7 +54,7 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	rc := http.NewResponseController(w)
 	for _, ev := range []string{
-		fmt.Sprintf(`{"type":"message_start","message":{"id":"msg_%s","model":"m","usage":{"input_tokens":1,"output_tokens":1}}}`, f.name),
+		fmt.Sprintf(`{"type":"message_start","message":{"id":"msg_%s","model":%q,"usage":{"input_tokens":1,"output_tokens":1}}}`, f.name, req.Model),
 		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}`,
 		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}`,
 		`{"type":"message_stop"}`,
@@ -73,10 +79,17 @@ type hubProc struct {
 
 func startHub(t *testing.T, st *store.Store, key []byte, addr string) *hubProc {
 	t.Helper()
+	if err := pricing.EnsureLoaded(st); err != nil { // 首次灌入快照，二次为幂等空操作
+		t.Fatal(err)
+	}
+	resolver, err := pricing.NewResolver(st)
+	if err != nil {
+		t.Fatal(err)
+	}
 	rt := realtime.New(st, key)
 	root := http.NewServeMux()
 	root.Handle("GET /api/v1/ws/agent", rt.Handler())
-	root.Handle("/", api.New(st, key, rt).Handler())
+	root.Handle("/", api.New(st, key, rt, resolver).Handler())
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("listen %s: %v", addr, err)
@@ -121,6 +134,18 @@ func (a *adminClient) post(path, body string, want int) []byte {
 		a.t.Fatalf("POST %s = %d (want %d): %s", path, resp.StatusCode, want, raw)
 	}
 	return raw
+}
+
+func (a *adminClient) get(path string) (int, []byte) {
+	a.t.Helper()
+	req, _ := http.NewRequest("GET", a.base+path, nil)
+	resp, err := a.cli.Do(req)
+	if err != nil {
+		a.t.Fatalf("GET %s: %v", path, err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, raw
 }
 
 func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
@@ -180,13 +205,19 @@ func TestM1EndToEnd(t *testing.T) {
 		t.Fatalf("pair: %v", err)
 	}
 
-	// Agent stack: forwarder + hub client.
-	fwd := forward.New(state.LocalToken, nil)
+	// Agent stack: forwarder + usage queue + hub client (M2 全管线).
+	buf, err := usagebuf.Open(filepath.Join(dir, "agent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buf.Close()
+	fwd := forward.New(state.LocalToken, func(u forward.Usage) { buf.Enqueue(u.ToRecord()) })
 	fwdSrv := httptest.NewServer(fwd.Handler())
 	defer fwdSrv.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client := hubclient.New(statePath, state, fwd)
+	client.UseQueue(buf)
 	go client.Run(ctx)
 
 	waitFor(t, "initial config push (A active)", 10*time.Second, func() bool {
@@ -197,7 +228,7 @@ func TestM1EndToEnd(t *testing.T) {
 	// Streaming request through the Agent must hit A with the swapped key.
 	askVia := func() string {
 		req, _ := http.NewRequest("POST", fwdSrv.URL+"/anthropic/v1/messages",
-			strings.NewReader(`{"model":"m","stream":true,"max_tokens":8,"messages":[]}`))
+			strings.NewReader(`{"model":"claude-haiku-4-5","stream":true,"max_tokens":8,"messages":[]}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+state.LocalToken)
 		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
@@ -268,5 +299,74 @@ func TestM1EndToEnd(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("agent state mode = %v", info.Mode().Perm())
+	}
+
+	// ---- M2 用量管线（验收：断连补报无缺口、request_id 无重复） ----
+	// 全程共 4 次计费请求：A、B、B（Hub 宕机期间，走本地缓冲）、A（重启后）。
+	// 宕机期间那条必须经重连补报落库；total==4 同时证明"无缺口"与"无重复"。
+	type usageResp struct {
+		Total int `json:"total"`
+		Rows  []struct {
+			RequestID  string   `json:"request_id"`
+			DeviceID   string   `json:"device_id"`
+			App        string   `json:"app"`
+			ProviderID string   `json:"provider_id"`
+			Model      string   `json:"model"`
+			Input      int64    `json:"input_tokens"`
+			Output     int64    `json:"output_tokens"`
+			Source     string   `json:"usage_source"`
+			Cost       *float64 `json:"cost"`
+		} `json:"rows"`
+	}
+	var ur usageResp
+	waitFor(t, "all 4 usage records land (incl. hub-down backfill)", 20*time.Second, func() bool {
+		code, raw := admin2.get("/api/v1/usage?limit=50")
+		if code != 200 {
+			return false
+		}
+		ur = usageResp{}
+		return json.Unmarshal(raw, &ur) == nil && ur.Total == 4
+	})
+
+	seen := map[string]bool{}
+	byProvider := map[string]int{}
+	for _, row := range ur.Rows {
+		if seen[row.RequestID] {
+			t.Fatalf("duplicate request_id in usage rows: %s", row.RequestID)
+		}
+		seen[row.RequestID] = true
+		byProvider[row.ProviderID]++
+		if row.DeviceID != state.DeviceID {
+			t.Fatalf("usage row device = %q, want %q", row.DeviceID, state.DeviceID)
+		}
+		if row.App != "claude-code" || row.Model != "claude-haiku-4-5" || row.Source != "wire" {
+			t.Fatalf("usage row attribution wrong: %+v", row)
+		}
+		if row.Input != 1 || row.Output != 2 {
+			t.Fatalf("usage tokens = %d/%d, want 1/2 (fake upstream)", row.Input, row.Output)
+		}
+		if row.Cost == nil || *row.Cost <= 0 {
+			t.Fatalf("cost not settled for known model claude-haiku-4-5: %+v", row.Cost)
+		}
+	}
+	if byProvider[pA.ID] != 2 || byProvider[pB.ID] != 2 {
+		t.Fatalf("provider attribution = %v, want A:2 B:2", byProvider)
+	}
+
+	// 聚合口径抽查：summary 的请求数与费用已知性。
+	code, raw := admin2.get("/api/v1/stats/summary?from=1")
+	if code != 200 {
+		t.Fatalf("summary = %d", code)
+	}
+	var sum struct {
+		Requests            int64    `json:"requests"`
+		Cost                *float64 `json:"cost"`
+		CostUnknownRequests int64    `json:"cost_unknown_requests"`
+	}
+	if err := json.Unmarshal(raw, &sum); err != nil {
+		t.Fatal(err)
+	}
+	if sum.Requests != 4 || sum.Cost == nil || sum.CostUnknownRequests != 0 {
+		t.Fatalf("summary = %s", raw)
 	}
 }

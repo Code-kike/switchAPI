@@ -18,11 +18,15 @@ import (
 	"time"
 
 	"github.com/Code-kike/switchAPI/internal/hub/api"
+	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/realtime"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 	"github.com/Code-kike/switchAPI/internal/shared/version"
 )
+
+// litellmURL is the upstream price table refreshed daily (研究#4).
+const litellmURL = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 
 func main() {
 	showVersion := flag.Bool("version", false, "打印版本号后退出")
@@ -62,8 +66,21 @@ func run(listen, dataDir string) error {
 		return fmt.Errorf("主密钥加载失败: %w", err)
 	}
 
+	// 计价引擎：首启从内嵌快照灌入 pricing_base，随后每日 ETag 同步（研究#4）。
+	if err := pricing.EnsureLoaded(st); err != nil {
+		return fmt.Errorf("价格表初始化失败: %w", err)
+	}
+	resolver, err := pricing.NewResolver(st)
+	if err != nil {
+		return fmt.Errorf("计价解析器构建失败: %w", err)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	go pricing.SyncDaily(ctx, st, litellmURL, resolver)
+
 	rt := realtime.New(st, masterKey)
-	apiSrv := api.New(st, masterKey, rt)
+	apiSrv := api.New(st, masterKey, rt, resolver)
 
 	root := http.NewServeMux()
 	root.Handle("GET /api/v1/ws/agent", rt.Handler())
@@ -75,9 +92,6 @@ func run(listen, dataDir string) error {
 		ReadHeaderTimeout: 5 * time.Second,
 		// WriteTimeout 保持 0：WS 长连接与未来的 SSE 都不能被写超时切断。
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	errCh := make(chan error, 1)
 	go func() {

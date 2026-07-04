@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 )
@@ -31,6 +32,7 @@ type Server struct {
 	st        *store.Store
 	masterKey []byte
 	agents    AgentChannel
+	pricer    *pricing.Resolver
 	mux       *http.ServeMux
 
 	mu       sync.Mutex
@@ -38,10 +40,10 @@ type Server struct {
 	pairings map[string]time.Time // one-time code → expiry
 }
 
-// New wires all routes. agents may be nil in tests.
-func New(st *store.Store, masterKey []byte, agents AgentChannel) *Server {
+// New wires all routes. agents and pricer may be nil in tests.
+func New(st *store.Store, masterKey []byte, agents AgentChannel, pricer *pricing.Resolver) *Server {
 	s := &Server{
-		st: st, masterKey: masterKey, agents: agents,
+		st: st, masterKey: masterKey, agents: agents, pricer: pricer,
 		mux:      http.NewServeMux(),
 		sessions: map[string]time.Time{},
 		pairings: map[string]time.Time{},
@@ -63,6 +65,10 @@ func New(st *store.Store, masterKey []byte, agents AgentChannel) *Server {
 	m.HandleFunc("GET /api/v1/devices", s.handleDeviceList)
 	m.HandleFunc("DELETE /api/v1/devices/{id}", s.handleDeviceRevoke)
 	m.HandleFunc("GET /api/v1/events", s.handleEvents)
+	m.HandleFunc("GET /api/v1/usage", s.handleUsage)
+	m.HandleFunc("GET /api/v1/stats/summary", s.handleStatsSummary)
+	m.HandleFunc("GET /api/v1/stats/trend", s.handleStatsTrend)
+	m.HandleFunc("GET /api/v1/stats/breakdown", s.handleStatsBreakdown)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))

@@ -1,0 +1,9 @@
+{"file": ".trellis/tasks/07-04-m2-stats-pricing/design.md", "reason": "M2 落地决策：协议扩展、管线结构、文件所有权"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/design.md", "reason": "权威技术方案 v2：§2 usage_records/pricing 表、§3 接口面、§4 用量采集、§6 计价引擎"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/03-usage-parsing-points.md", "reason": "usage 字段级规格：三协议采集点、累计语义、C7 中断矩阵、四分项映射表（W-A 必读）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/04-litellm-pricing.md", "reason": "计价规格：字段名/单位、四步模型名匹配、ETag 同步、upsert-only、真实样本（W-B 必读）"}
+{"file": "CONTEXT.md", "reason": "术语表：用量记录/费用/折扣系数——纯元数据红线"}
+{"file": "docs/adr/0002-same-format-passthrough.md", "reason": "tee 只旁路解析，绝不改动透传字节"}
+{"file": "docs/adr/0005-lan-first-security-posture.md", "reason": "本地队列/状态文件权限约束"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端质量规范"}
+{"file": ".trellis/spec/backend/error-handling.md", "reason": "错误处理规范"}

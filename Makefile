@@ -9,7 +9,7 @@ DIST    := dist
 # 交叉编译矩阵（与 CI matrix 一致）
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: build test vet cross clean
+.PHONY: build test vet cross clean pricing-snapshot
 
 ## build: 构建当前平台的 hub 与 agent 二进制到 dist/
 build:
@@ -39,3 +39,10 @@ cross:
 ## clean: 清理构建产物
 clean:
 	rm -rf $(DIST)
+
+## pricing-snapshot: 重新拉取 LiteLLM 价格表，过滤 mode∈{chat,responses} 后写入
+## internal/hub/pricing/snapshot.json（研究#4）。MIT 许可，随二进制分发保留 notice。
+PRICING_URL := https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json
+pricing-snapshot:
+	python3 scripts/build_pricing_snapshot.py "$(PRICING_URL)" internal/hub/pricing/snapshot.json
+

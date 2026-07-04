@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Code-kike/switchAPI/internal/hub/api"
+	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 	"github.com/Code-kike/switchAPI/internal/shared/wire"
@@ -41,9 +42,13 @@ func newRig(t *testing.T) *rig {
 		t.Fatal(err)
 	}
 	hub := New(st, key)
+	resolver, err := pricing.NewResolver(st)
+	if err != nil {
+		t.Fatal(err)
+	}
 	root := http.NewServeMux()
 	root.Handle("GET /api/v1/ws/agent", hub.Handler())
-	root.Handle("/", api.New(st, key, hub).Handler())
+	root.Handle("/", api.New(st, key, hub, resolver).Handler())
 	srv := httptest.NewServer(root)
 	t.Cleanup(srv.Close)
 
@@ -167,6 +172,82 @@ func TestConnectPushAndBroadcastOnSwitch(t *testing.T) {
 	if push2.Rev <= rev1 {
 		t.Fatalf("rev did not increase: %d → %d", rev1, push2.Rev)
 	}
+}
+
+func TestUsageBatchIngestAndAck(t *testing.T) {
+	r := newRig(t)
+	token := r.seedDevice("d1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	c, _, err := r.dial(ctx, token)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer c.Close(websocket.StatusNormalClosure, "")
+	_ = readPush(t, ctx, c) // initial snapshot
+
+	batch := wire.UsageBatch{
+		BatchID: "b1",
+		Records: []wire.UsageRecord{
+			{RequestID: "req1", TS: 1000, App: "claude-code", ProviderID: "p1",
+				Model: "claude-haiku-4-5", InputTokens: 10, OutputTokens: 20,
+				Status: 200, UsageSource: "wire"},
+			{RequestID: "req2", TS: 1001, App: "codex", ProviderID: "p2",
+				Model: "gpt-5.1-codex", InputTokens: 5, OutputTokens: 6,
+				Status: 200, UsageSource: "wire"},
+		},
+	}
+
+	// Send the batch, expect a usage_ack echoing batch_id.
+	env, _ := wire.NewEnvelope(wire.TypeUsageBatch, batch)
+	if err := wsjson.Write(ctx, c, env); err != nil {
+		t.Fatal(err)
+	}
+	ack := readAck(t, ctx, c)
+	if ack.BatchID != "b1" {
+		t.Fatalf("ack batch_id = %q, want b1", ack.BatchID)
+	}
+
+	// Rows landed, attributed to the connection's device.
+	rows, total, err := r.st.QueryUsage(store.UsageFilter{})
+	if err != nil || total != 2 {
+		t.Fatalf("query after batch: total=%d err=%v", total, err)
+	}
+	if rows[0].DeviceID != "d1" {
+		t.Fatalf("device_id = %q, want d1", rows[0].DeviceID)
+	}
+
+	// Resending the same batch (at-least-once) dedups on request_id but still
+	// acks so the Agent clears its queue.
+	if err := wsjson.Write(ctx, c, env); err != nil {
+		t.Fatal(err)
+	}
+	if ack := readAck(t, ctx, c); ack.BatchID != "b1" {
+		t.Fatalf("re-ack batch_id = %q", ack.BatchID)
+	}
+	_, total, _ = r.st.QueryUsage(store.UsageFilter{})
+	if total != 2 {
+		t.Fatalf("duplicate batch inflated rows: total=%d", total)
+	}
+}
+
+func readAck(t *testing.T, ctx context.Context, c *websocket.Conn) wire.UsageAck {
+	t.Helper()
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var env wire.Envelope
+	if err := wsjson.Read(rctx, c, &env); err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if env.Type != wire.TypeUsageAck {
+		t.Fatalf("envelope type = %q, want usage_ack", env.Type)
+	}
+	var ack wire.UsageAck
+	if err := env.Decode(&ack); err != nil {
+		t.Fatal(err)
+	}
+	return ack
 }
 
 func TestAuthRejectsBadAndRevokedTokens(t *testing.T) {

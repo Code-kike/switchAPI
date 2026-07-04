@@ -18,7 +18,9 @@ import (
 
 const (
 	maxRewriteBody = 32 << 20 // cap request buffering for the rewrite path
-	maxSSELine     = 1 << 20  // bound for a single SSE line kept by the usage parser
+	maxSSELine     = 1 << 20  // bound for a single anthropic SSE line
+	maxOpenAILine  = 8 << 20  // openai response.completed embeds the whole output on one line
+	maxJSONBody    = 8 << 20  // bound for buffering a non-streaming JSON response
 )
 
 func buildProxy(sink UsageSink) *httputil.ReverseProxy {
@@ -65,17 +67,23 @@ func buildProxy(sink UsageSink) *httputil.ReverseProxy {
 			// The usage tee must never see compressed bytes (research/06).
 			pr.Out.Header.Set("Accept-Encoding", "identity")
 			// No SetXForwarded(): loopback-only hop.
-			rewriteModel(pr, d.up.ModelRedirects)
+			rewriteModel(pr, d)
 		},
 		ModifyResponse: func(res *http.Response) error {
-			if sink == nil || !shouldParseSSE(res) {
+			if sink == nil {
 				return nil
 			}
 			d := decisionFrom(res.Request.Context())
-			if d == nil || d.up == nil || d.up.Protocol != "anthropic" {
-				return nil // openai (Responses) parsing lands in M2
+			if d == nil || d.up == nil || !d.billing {
+				return nil // non-billing path: pass through, no record (research/03 C8)
 			}
-			res.Body = newUsageTee(res.Body, res.StatusCode, d.up.ProviderID, sink)
+			if shouldParseSSE(res) {
+				res.Body = newStreamTee(res.Body, res.StatusCode, d, sink)
+			} else {
+				// Non-streaming: buffer + parse only genuine JSON bodies; other
+				// content (error pages) still yields a record (usage_source=none).
+				res.Body = newJSONTee(res.Body, res.StatusCode, d, sink, isJSONResponse(res))
+			}
 			return nil
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
@@ -91,10 +99,16 @@ func shouldParseSSE(res *http.Response) bool {
 	return strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
 }
 
+func isJSONResponse(res *http.Response) bool {
+	return strings.Contains(res.Header.Get("Content-Type"), "json")
+}
+
 // rewriteModel buffers the request body ONLY when a redirect table exists and
 // the body is a plain JSON candidate; otherwise the body streams through
-// untouched (zero copy).
-func rewriteModel(pr *httputil.ProxyRequest, redirects map[string]string) {
+// untouched (zero copy). It also records the model provenance on the decision
+// (request model + redirect target) for the usage record.
+func rewriteModel(pr *httputil.ProxyRequest, d *decision) {
+	redirects := d.up.ModelRedirects
 	if len(redirects) == 0 || pr.Out.Body == nil {
 		return
 	}
@@ -124,9 +138,14 @@ func rewriteModel(pr *httputil.ProxyRequest, redirects map[string]string) {
 	}
 	pr.Out.Body.Close()
 
-	patched, _, _, ok, perr := patchModel(head, redirects)
+	patched, from, to, ok, perr := patchModel(head, redirects)
 	if perr != nil || !ok {
+		if perr == nil && from != "" {
+			d.reqModel = from // parsed the model, just no redirect for it
+		}
 		patched = head // not JSON / no match → forward original bytes
+	} else {
+		d.reqModel, d.redirModel = from, to
 	}
 	pr.Out.Body = io.NopCloser(bytes.NewReader(patched))
 	pr.Out.ContentLength = int64(len(patched))                      // Transport writes CL from this field

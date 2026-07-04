@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/Code-kike/switchAPI/internal/agent/forward"
+	"github.com/Code-kike/switchAPI/internal/agent/usagebuf"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 	"github.com/Code-kike/switchAPI/internal/shared/version"
 	"github.com/Code-kike/switchAPI/internal/shared/wire"
@@ -170,12 +171,18 @@ type Client struct {
 	statePath string
 	state     *State
 	fwd       *forward.Server
+	buf       *usagebuf.Queue // optional usage queue; nil → no reporting (M1 behavior)
 }
 
 // New builds a client around a loaded state.
 func New(statePath string, st *State, fwd *forward.Server) *Client {
 	return &Client{statePath: statePath, state: st, fwd: fwd}
 }
+
+// UseQueue attaches the usage queue whose batches this client pumps to the Hub
+// and whose rows it acks on usage_ack. Call before Run. A nil queue leaves the
+// client in pure M1 (config-only) mode.
+func (c *Client) UseQueue(buf *usagebuf.Queue) { c.buf = buf }
 
 // Run blocks until ctx is done: swap-from-snapshot immediately, then connect
 // / reconnect forever with exponential backoff.
@@ -224,15 +231,10 @@ func (c *Client) connectOnce(ctx context.Context) (healthy bool) {
 	defer cancel()
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
 
-	hello, _ := wire.NewEnvelope(wire.TypeHello, wire.Hello{
-		Name: hostname(), Platform: runtime.GOOS, Version: version.Version,
-	})
-	if err := writeEnv(cctx, conn, hello); err != nil {
-		return false
-	}
-
-	// Writer: heartbeat every 30s (coder/websocket allows one concurrent
-	// reader + one writer; reads happen below on this goroutine).
+	// Single writer: coder/websocket permits one concurrent reader (the loop
+	// below) + one writer. The writer drains a send channel (hello, usage
+	// batches) and a 30s heartbeat ticker; everything outbound goes through it.
+	send := make(chan wire.Envelope, 64)
 	go func() {
 		tick := time.NewTicker(30 * time.Second)
 		defer tick.Stop()
@@ -240,40 +242,120 @@ func (c *Client) connectOnce(ctx context.Context) (healthy bool) {
 			select {
 			case <-cctx.Done():
 				return
+			case env := <-send:
+				if err := writeEnv(cctx, conn, env); err != nil {
+					cancel() // wake the read loop to exit
+					return
+				}
 			case <-tick.C:
 				hb, _ := wire.NewEnvelope(wire.TypeHeartbeat, wire.Heartbeat{SentAt: time.Now().Unix()})
 				if err := writeEnv(cctx, conn, hb); err != nil {
-					cancel() // 唤醒读循环退出
+					cancel()
 					return
 				}
 			}
 		}
 	}()
 
+	hello, _ := wire.NewEnvelope(wire.TypeHello, wire.Hello{
+		Name: hostname(), Platform: runtime.GOOS, Version: version.Version,
+	})
+	select {
+	case send <- hello:
+	case <-cctx.Done():
+		return false
+	}
+
+	// Usage pump: on (re)connect, return any records handed to an unacked batch
+	// to the pending pool, then keep flushing pending batches to the Hub.
+	if c.buf != nil {
+		c.buf.ResetInflight()
+		go c.pumpUsage(cctx, send)
+	}
+
 	for {
 		var env wire.Envelope
 		if err := wsjson.Read(cctx, conn, &env); err != nil {
 			return healthy
 		}
-		if env.Type != wire.TypeConfigPush {
-			continue
+		switch env.Type {
+		case wire.TypeConfigPush:
+			var push wire.ConfigPush
+			if err := env.Decode(&push); err != nil {
+				log.Printf("hubclient: 非法 config_push: %v", err)
+				continue
+			}
+			if c.state.LastPush != nil && push.Rev < c.state.LastPush.Rev {
+				log.Printf("hubclient: 忽略过期推送 rev=%d（本地 rev=%d）", push.Rev, c.state.LastPush.Rev)
+				continue
+			}
+			c.fwd.Swap(BuildTable(&push))
+			c.state.LastPush = &push
+			if err := SaveState(c.statePath, c.state); err != nil {
+				log.Printf("hubclient: 快照落盘失败: %v", err)
+			}
+			healthy = true
+			log.Printf("hubclient: 已应用配置推送 rev=%d", push.Rev)
+		case wire.TypeUsageAck:
+			if c.buf == nil {
+				continue
+			}
+			var ack wire.UsageAck
+			if err := env.Decode(&ack); err != nil {
+				log.Printf("hubclient: 非法 usage_ack: %v", err)
+				continue
+			}
+			c.buf.Ack(ack.BatchID)
 		}
-		var push wire.ConfigPush
-		if err := env.Decode(&push); err != nil {
-			log.Printf("hubclient: 非法 config_push: %v", err)
-			continue
+	}
+}
+
+// pumpUsage backfills all pending usage on connect, then flushes on a 2s cadence
+// (or sooner once a burst of ≥50 records has accumulated). It runs until the
+// connection context is canceled. Each batch is marked in-flight by NextBatch
+// and only deleted when the Hub's usage_ack arrives (at-least-once).
+func (c *Client) pumpUsage(ctx context.Context, send chan<- wire.Envelope) {
+	c.flushUsage(ctx, send) // reconnect backfill
+
+	poll := time.NewTicker(500 * time.Millisecond)
+	defer poll.Stop()
+	last := time.Now()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-poll.C:
+			n, err := c.buf.PendingCount()
+			if err != nil || n == 0 {
+				continue
+			}
+			if n >= 50 || time.Since(last) >= 2*time.Second {
+				c.flushUsage(ctx, send)
+				last = time.Now()
+			}
 		}
-		if c.state.LastPush != nil && push.Rev < c.state.LastPush.Rev {
-			log.Printf("hubclient: 忽略过期推送 rev=%d（本地 rev=%d）", push.Rev, c.state.LastPush.Rev)
-			continue
+	}
+}
+
+// flushUsage drains every currently-pending record into batches of 100 and
+// hands them to the writer. Records already in flight are skipped by NextBatch,
+// so this terminates once nothing new remains.
+func (c *Client) flushUsage(ctx context.Context, send chan<- wire.Envelope) {
+	for {
+		batch, ok := c.buf.NextBatch(100)
+		if !ok {
+			return
 		}
-		c.fwd.Swap(BuildTable(&push))
-		c.state.LastPush = &push
-		if err := SaveState(c.statePath, c.state); err != nil {
-			log.Printf("hubclient: 快照落盘失败: %v", err)
+		env, err := wire.NewEnvelope(wire.TypeUsageBatch, batch)
+		if err != nil {
+			log.Printf("hubclient: 用量批封装失败: %v", err)
+			return
 		}
-		healthy = true
-		log.Printf("hubclient: 已应用配置推送 rev=%d", push.Rev)
+		select {
+		case send <- env:
+		case <-ctx.Done():
+			return
+		}
 	}
 }
 

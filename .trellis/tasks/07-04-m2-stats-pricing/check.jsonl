@@ -1,0 +1,6 @@
+{"file": ".trellis/tasks/07-04-m2-stats-pricing/prd.md", "reason": "M2 验收标准逐条核对基准"}
+{"file": ".trellis/tasks/07-04-m2-stats-pricing/design.md", "reason": "M2 设计符合性（协议/管线/所有权）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/03-usage-parsing-points.md", "reason": "字段映射与中断矩阵正确性核对"}
+{"file": "CONTEXT.md", "reason": "术语一致性 + 用量记录纯元数据红线（永不含消息内容）"}
+{"file": "docs/adr/0002-same-format-passthrough.md", "reason": "检查 tee 未改动透传字节、未注入请求参数"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "后端质量规范"}

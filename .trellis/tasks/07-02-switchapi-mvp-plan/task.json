@@ -19,7 +19,8 @@
   "pr_url": null,
   "subtasks": [],
   "children": [
-    "07-04-m1-data-forwarding"
+    "07-04-m1-data-forwarding",
+    "07-04-m2-stats-pricing"
   ],
   "parent": null,
   "relatedFiles": [],

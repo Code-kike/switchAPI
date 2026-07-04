@@ -230,8 +230,9 @@ func TestUsageTeeO1MemoryOnLongStream(t *testing.T) {
 	}
 
 	u := <-r.usageCh
-	if u.Model != redirTo {
-		t.Errorf("usage model = %q, want %q (redirect must be visible in echo)", u.Model, redirTo)
+	if u.Model != haiku || u.ModelRedirected != redirTo {
+		t.Errorf("usage model = %q / redirected = %q, want %q / %q (redirect recorded from→to)",
+			u.Model, u.ModelRedirected, haiku, redirTo)
 	}
 	if u.InputTokens != 123 || u.OutputTokens != 42 || !u.Done {
 		t.Errorf("usage = %+v", u)

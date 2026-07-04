@@ -12,6 +12,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 )
@@ -31,12 +32,21 @@ func (s *stubChannel) Kick(id string) {
 func (s *stubChannel) count() int { s.mu.Lock(); defer s.mu.Unlock(); return s.broadcasts }
 
 type testRig struct {
-	st   *store.Store
-	key  []byte
-	ch   *stubChannel
-	srv  *httptest.Server
-	auth *http.Client // logged-in client (cookie jar)
-	anon *http.Client
+	st     *store.Store
+	key    []byte
+	ch     *stubChannel
+	pricer *pricing.Resolver
+	srv    *httptest.Server
+	auth   *http.Client // logged-in client (cookie jar)
+	anon   *http.Client
+}
+
+// reloadPricer refreshes the resolver after seeding prices/overrides mid-test.
+func (r *testRig) reloadPricer(t *testing.T) {
+	t.Helper()
+	if err := r.pricer.Reload(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newTestRig(t *testing.T) *testRig {
@@ -52,11 +62,15 @@ func newTestRig(t *testing.T) *testRig {
 		t.Fatal(err)
 	}
 	ch := &stubChannel{}
-	srv := httptest.NewServer(New(st, key, ch).Handler())
+	resolver, err := pricing.NewResolver(st)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(New(st, key, ch, resolver).Handler())
 	t.Cleanup(srv.Close)
 
 	jar, _ := cookiejar.New(nil)
-	rig := &testRig{st: st, key: key, ch: ch, srv: srv,
+	rig := &testRig{st: st, key: key, ch: ch, pricer: resolver, srv: srv,
 		auth: &http.Client{Jar: jar}, anon: &http.Client{}}
 
 	// bootstrap login sets the admin password

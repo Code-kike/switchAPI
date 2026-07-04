@@ -13,6 +13,9 @@ import (
 	"net/url"
 	"strings"
 	"sync/atomic"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 // Upstream is one provider endpoint as pushed by the Hub.
@@ -78,11 +81,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	table := s.table.Load()
 	var up *Upstream
 	var rest string
+	var app string
 	switch {
 	case hasPrefix(r.URL.Path, prefixAnthropic):
-		up, rest = table.Anthropic, strings.TrimPrefix(r.URL.Path, prefixAnthropic)
+		up, rest, app = table.Anthropic, strings.TrimPrefix(r.URL.Path, prefixAnthropic), "claude-code"
 	case hasPrefix(r.URL.Path, prefixOpenAI):
-		up, rest = table.OpenAI, strings.TrimPrefix(r.URL.Path, prefixOpenAI)
+		up, rest, app = table.OpenAI, strings.TrimPrefix(r.URL.Path, prefixOpenAI), "codex"
 	default:
 		writeErr(w, http.StatusNotFound, "未知路由前缀（应为 /anthropic/* 或 /openai/v1/*）")
 		return
@@ -91,16 +95,40 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "该协议当前没有生效供应商（等待 Hub 配置推送）")
 		return
 	}
+
+	// Billing predicate (research/03 C8): only POST to the inference endpoint of
+	// each protocol produces a usage record. count_tokens / GET models / OPTIONS
+	// pass through untee'd. Evaluated on the stripped path before the "/" fixup.
+	d := &decision{
+		up:        up,
+		requestID: uuid.NewString(),
+		app:       app,
+		start:     time.Now(),
+		billing:   r.Method == http.MethodPost && isBillingPath(up.Protocol, rest),
+	}
 	if rest == "" {
 		rest = "/"
 	}
 
 	// The proxy's Rewrite reads the decision from the context; the prefix is
 	// stripped here so SetURL's path join sees only the provider-relative path.
-	r2 := r.Clone(context.WithValue(r.Context(), decisionKey{}, &decision{up: up}))
+	r2 := r.Clone(context.WithValue(r.Context(), decisionKey{}, d))
 	r2.URL.Path = rest
 	r2.URL.RawPath = ""
 	s.proxy.ServeHTTP(w, r2)
+}
+
+// isBillingPath reports whether a stripped request path is the metered
+// inference endpoint for its protocol: anthropic .../messages, openai
+// .../responses. count_tokens (.../messages/count_tokens) is excluded.
+func isBillingPath(protocol, rest string) bool {
+	switch protocol {
+	case "anthropic":
+		return strings.HasSuffix(rest, "/messages")
+	case "openai":
+		return strings.HasSuffix(rest, "/responses")
+	}
+	return false
 }
 
 // Handler returns the http.Handler to mount on the local listener.
@@ -124,7 +152,31 @@ func hasPrefix(path, prefix string) bool {
 
 type decisionKey struct{}
 
-type decision struct{ up *Upstream }
+// decision is the per-request routing + accounting context, set in ServeHTTP
+// and read by the proxy's Rewrite (model capture) and the usage tee.
+type decision struct {
+	up        *Upstream
+	requestID string
+	app       string
+	start     time.Time
+	billing   bool
+
+	// Model provenance, filled by rewriteModel when the request body is parsed:
+	// reqModel is the model the client asked for; redirModel is the redirect
+	// target ("to"), set only when a redirect actually applied.
+	reqModel   string
+	redirModel string
+}
+
+// recordModel picks the model to record: the client-requested model when known,
+// otherwise the model observed on the wire (which, absent a redirect, is the
+// same thing).
+func (d *decision) recordModel(wireModel string) string {
+	if d.reqModel != "" {
+		return d.reqModel
+	}
+	return wireModel
+}
 
 func decisionFrom(ctx context.Context) *decision {
 	d, _ := ctx.Value(decisionKey{}).(*decision)

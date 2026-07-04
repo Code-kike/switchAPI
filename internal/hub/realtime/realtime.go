@@ -116,8 +116,38 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case wire.TypeHeartbeat:
 			// TouchDevice 已完成全部工作
+		case wire.TypeUsageBatch:
+			if err := h.ingestUsage(ctx, c, dev.ID, env); err != nil {
+				return // write failed → let the Agent reconnect and retry
+			}
 		}
 	}
+}
+
+// ingestUsage stores a reported batch (device_id attributed from the
+// connection, never trusted from the Agent) and acknowledges it by batch_id so
+// the Agent can drop it from its local queue. A decode/insert error is logged
+// and left unacked — at-least-once delivery means the Agent resends. Only a
+// failed ack write is returned (it drops the connection).
+func (h *Hub) ingestUsage(ctx context.Context, c *websocket.Conn, deviceID string, env wire.Envelope) error {
+	var batch wire.UsageBatch
+	if err := env.Decode(&batch); err != nil {
+		log.Printf("realtime: device %s bad usage_batch: %v", deviceID, err)
+		return nil
+	}
+	inserted, err := h.st.InsertUsageRecords(deviceID, batch.Records)
+	if err != nil {
+		log.Printf("realtime: device %s usage insert: %v", deviceID, err)
+		return nil // no ack → Agent retries the batch
+	}
+	log.Printf("realtime: device %s usage_batch %s: %d inserted, %d ignored",
+		deviceID, batch.BatchID, inserted, len(batch.Records)-inserted)
+	ack, err := wire.NewEnvelope(wire.TypeUsageAck, wire.UsageAck{BatchID: batch.BatchID})
+	if err != nil {
+		log.Printf("realtime: build usage_ack: %v", err)
+		return nil
+	}
+	return sendEnvelope(ctx, c, ack)
 }
 
 // Broadcast bumps the config revision and pushes a fresh snapshot to every
@@ -187,6 +217,11 @@ func send(ctx context.Context, c *websocket.Conn, push wire.ConfigPush) error {
 	if err != nil {
 		return err
 	}
+	return sendEnvelope(ctx, c, env)
+}
+
+// sendEnvelope writes any envelope under the shared write timeout.
+func sendEnvelope(ctx context.Context, c *websocket.Conn, env wire.Envelope) error {
 	wctx, cancel := context.WithTimeout(ctx, writeTimeout)
 	defer cancel()
 	return wsjson.Write(wctx, c, env)
