@@ -68,7 +68,7 @@ func (s *Server) handlePair(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.st.AppendEvent("pairing", eventJSON(map[string]string{
+	s.event("pairing", eventJSON(map[string]string{
 		"action": "paired", "device_id": d.ID, "name": d.Name}))
 	// token 仅此一次下发；库中只存哈希（ADR-0005）。
 	writeJSON(w, http.StatusOK, map[string]any{"device_id": d.ID, "token": token})
@@ -108,7 +108,7 @@ func (s *Server) handleDeviceRevoke(w http.ResponseWriter, r *http.Request) {
 	if s.agents != nil {
 		s.agents.Kick(id) // 掐断已建立的 WS 连接，令吊销即时生效
 	}
-	s.st.AppendEvent("pairing", eventJSON(map[string]string{"action": "revoked", "device_id": id}))
+	s.event("pairing", eventJSON(map[string]string{"action": "revoked", "device_id": id}))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 

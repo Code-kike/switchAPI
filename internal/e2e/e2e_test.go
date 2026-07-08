@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,9 @@ import (
 	"github.com/Code-kike/switchAPI/internal/hub/realtime"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
+	"github.com/Code-kike/switchAPI/internal/shared/wire"
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 // fakeUpstream is a minimal Anthropic-flavored SSE provider whose message id
@@ -75,6 +79,7 @@ type hubProc struct {
 	srv *http.Server
 	ln  net.Listener
 	rt  *realtime.Hub
+	api *api.Server
 }
 
 func startHub(t *testing.T, st *store.Store, key []byte, addr string) *hubProc {
@@ -87,20 +92,23 @@ func startHub(t *testing.T, st *store.Store, key []byte, addr string) *hubProc {
 		t.Fatal(err)
 	}
 	rt := realtime.New(st, key)
+	apiSrv := api.New(st, key, rt, resolver)
+	rt.SetUsageNotifier(apiSrv) // 用量入库 → ws/ui usage_tick（与 cmd/hub 相同接线）
 	root := http.NewServeMux()
 	root.Handle("GET /api/v1/ws/agent", rt.Handler())
-	root.Handle("/", api.New(st, key, rt, resolver).Handler())
+	root.Handle("/", apiSrv.Handler())
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		t.Fatalf("listen %s: %v", addr, err)
 	}
 	srv := &http.Server{Handler: root, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln)
-	return &hubProc{srv: srv, ln: ln, rt: rt}
+	return &hubProc{srv: srv, ln: ln, rt: rt, api: apiSrv}
 }
 
 func (h *hubProc) stop() {
 	h.rt.CloseAll() // 模拟进程死亡：hijacked WS 必须显式断开
+	h.api.CloseUI() // ws/ui 同理
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	h.srv.Shutdown(ctx)
@@ -368,5 +376,72 @@ func TestM1EndToEnd(t *testing.T) {
 	}
 	if sum.Requests != 4 || sum.Cost == nil || sum.CostUnknownRequests != 0 {
 		t.Fatalf("summary = %s", raw)
+	}
+
+	// ---- M3 ws/ui 实时通道（验收：任一端操作，其他端 1 秒内可见） ----
+	// 两个"端"（模拟手机浏览器与桌面壳）同时在线；切换与新用量都要双端推达。
+	dialUI := func() *websocket.Conn {
+		u, _ := url.Parse(hubURL)
+		h := http.Header{}
+		for _, c := range admin2.cli.Jar.Cookies(u) {
+			h.Add("Cookie", c.Name+"="+c.Value)
+		}
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		c, _, err := websocket.Dial(dctx, "ws"+strings.TrimPrefix(hubURL, "http")+"/api/v1/ws/ui",
+			&websocket.DialOptions{HTTPHeader: h})
+		if err != nil {
+			t.Fatalf("dial ws/ui: %v", err)
+		}
+		return c
+	}
+	readUntil := func(c *websocket.Conn, typ string, timeout time.Duration) wire.Envelope {
+		deadline := time.Now().Add(timeout)
+		for {
+			rctx, rcancel := context.WithDeadline(context.Background(), deadline)
+			var env wire.Envelope
+			err := wsjson.Read(rctx, c, &env)
+			rcancel()
+			if err != nil {
+				t.Fatalf("ws/ui waiting for %s: %v", typ, err)
+			}
+			if env.Type == typ {
+				return env
+			}
+		}
+	}
+	ui1, ui2 := dialUI(), dialUI()
+	defer ui1.CloseNow()
+	defer ui2.CloseNow()
+
+	// 切换 → 双端 1s 内收到 state_changed（PRD 验收上限）。
+	admin2.post("/api/v1/switch", `{"app":"claude-code","provider_id":"`+pB.ID+`"}`, 200)
+	for i, c := range []*websocket.Conn{ui1, ui2} {
+		var st wire.UIStateChanged
+		if err := readUntil(c, wire.TypeUIStateChanged, time.Second).Decode(&st); err != nil {
+			t.Fatal(err)
+		}
+		if st.Apps["claude-code"] != pB.ID {
+			t.Fatalf("ui client %d state_changed = %v, want claude-code=%s", i+1, st.Apps, pB.ID)
+		}
+		if st.Rev <= 0 {
+			t.Fatalf("ui client %d rev = %d, want >0", i+1, st.Rev)
+		}
+	}
+
+	// 新用量（第 5 次计费请求）→ 批量上报入库 → 双端收到 usage_tick。
+	waitFor(t, "agent routes to B before the 5th request", 10*time.Second, func() bool {
+		tb := fwd.Table()
+		return tb.Anthropic != nil && tb.Anthropic.ProviderID == pB.ID
+	})
+	askVia()
+	for i, c := range []*websocket.Conn{ui1, ui2} {
+		var tk wire.UIUsageTick
+		if err := readUntil(c, wire.TypeUIUsageTick, 15*time.Second).Decode(&tk); err != nil {
+			t.Fatal(err)
+		}
+		if tk.Inserted != 1 || tk.LastTS == 0 {
+			t.Fatalf("ui client %d usage_tick = %+v", i+1, tk)
+		}
 	}
 }

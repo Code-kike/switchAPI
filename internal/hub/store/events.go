@@ -15,14 +15,23 @@ type Event struct {
 }
 
 // AppendEvent records an event; payload must be valid JSON object text (the
-// caller marshals).
-func (s *Store) AppendEvent(kind, payload string) error {
+// caller marshals). The inserted row is returned so callers can fan it out to
+// live UI clients (M3 ws/ui) without a re-query.
+func (s *Store) AppendEvent(kind, payload string) (Event, error) {
 	if payload == "" {
 		payload = "{}"
 	}
-	_, err := s.db.Exec(`INSERT INTO events (ts, kind, payload) VALUES (?,?,?)`,
-		time.Now().Unix(), kind, payload)
-	return err
+	ts := time.Now().Unix()
+	res, err := s.db.Exec(`INSERT INTO events (ts, kind, payload) VALUES (?,?,?)`,
+		ts, kind, payload)
+	if err != nil {
+		return Event{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Event{}, err
+	}
+	return Event{ID: id, TS: ts, Kind: kind, Payload: payload}, nil
 }
 
 // RecentEvents returns up to n events, newest first.

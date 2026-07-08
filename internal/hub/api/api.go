@@ -38,6 +38,8 @@ type Server struct {
 	mu       sync.Mutex
 	sessions map[string]time.Time // token → expiry
 	pairings map[string]time.Time // one-time code → expiry
+
+	ui uiHub // ws/ui 实时下行通道（uiws.go）
 }
 
 // New wires all routes. agents and pricer may be nil in tests.
@@ -69,6 +71,7 @@ func New(st *store.Store, masterKey []byte, agents AgentChannel, pricer *pricing
 	m.HandleFunc("GET /api/v1/stats/summary", s.handleStatsSummary)
 	m.HandleFunc("GET /api/v1/stats/trend", s.handleStatsTrend)
 	m.HandleFunc("GET /api/v1/stats/breakdown", s.handleStatsBreakdown)
+	m.HandleFunc("GET /api/v1/ws/ui", s.handleUIWS) // 受 session 中间件保护
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))
@@ -128,7 +131,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			httpError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		s.st.AppendEvent("auth", `{"action":"bootstrap"}`)
+		s.event("auth", `{"action":"bootstrap"}`)
 	} else if !cryptoutil.Argon2idVerify(req.Password, hash) {
 		httpError(w, http.StatusUnauthorized, "密码错误")
 		return

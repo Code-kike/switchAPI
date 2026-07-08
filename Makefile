@@ -9,7 +9,20 @@ DIST    := dist
 # 交叉编译矩阵（与 CI matrix 一致）
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
-.PHONY: build test vet cross clean pricing-snapshot
+.PHONY: build test vet cross clean pricing-snapshot web clean-web
+
+WEBUI_DIST := internal/hub/webui/dist
+
+## web: 构建 SPA 并拷入 hub 的 embed 目录（之后 make build 产出的 hub 即带完整 Web 控制台）
+web:
+	cd web && pnpm install --frozen-lockfile && pnpm build
+	rm -rf $(WEBUI_DIST)
+	cp -r web/dist $(WEBUI_DIST)
+
+## clean-web: 清掉真实 SPA 产物，还原入库的占位 index.html（保持工作区干净）
+clean-web:
+	rm -rf $(WEBUI_DIST)
+	git checkout -- $(WEBUI_DIST)
 
 ## build: 构建当前平台的 hub 与 agent 二进制到 dist/
 build:

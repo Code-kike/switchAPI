@@ -36,6 +36,7 @@ type testRig struct {
 	key    []byte
 	ch     *stubChannel
 	pricer *pricing.Resolver
+	api    *Server
 	srv    *httptest.Server
 	auth   *http.Client // logged-in client (cookie jar)
 	anon   *http.Client
@@ -66,11 +67,12 @@ func newTestRig(t *testing.T) *testRig {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(New(st, key, ch, resolver).Handler())
+	apiSrv := New(st, key, ch, resolver)
+	srv := httptest.NewServer(apiSrv.Handler())
 	t.Cleanup(srv.Close)
 
 	jar, _ := cookiejar.New(nil)
-	rig := &testRig{st: st, key: key, ch: ch, pricer: resolver, srv: srv,
+	rig := &testRig{st: st, key: key, ch: ch, pricer: resolver, api: apiSrv, srv: srv,
 		auth: &http.Client{Jar: jar}, anon: &http.Client{}}
 
 	// bootstrap login sets the admin password

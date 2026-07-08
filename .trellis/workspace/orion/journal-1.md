@@ -40,6 +40,25 @@
   无法复现，不掩盖，观察 CI。
 - 遗留：跑一天真实对账验收（部署后）；M3 双端体验未开工。
 
+## 2026-07-05/08 — M3 双端体验完成（任务 07-05-m3-dual-experience）
+
+- 收尾归档：M1/M2 task.json 标 completed 并 archive/2026-07（task.py finish 只清指针，状态需手写）。
+- **子代理 5 派 5 亡**（429/ECONNRESET，中转站对新会话持续拒绝；主会话 API 正常）——W-A/W-B/W-C
+  含重试全部零产出阵亡，最终全部由主会话内联实现（M1 模式重演；用户随后清停全部后台代理）。
+- W0：wire/ui.go 三消息契约、webui embed（占位页保证无 node 可 build）、web 脚手架（Vite8/React19/
+  Tailwind4/shadcn）。W-A：ws/ui 通道（api 包内、session 中间件顺带鉴权、每连接 writer goroutine、
+  慢客户端摘除）、AppendEvent 改返回插入行、全事件点 s.event() 入库即推送、realtime.SetUsageNotifier。
+- W-B：SPA 六页全量 + ws 失效通知 invalidate；chrome-devtools 真浏览器冒烟全链路点通（控制台零错）；
+  踩坑：新版 shadcn/base-ui Select 的 onValueChange 是 string|null 且显示 label 需 items 映射。
+- W-C：Tauri 2.11 壳一次编译通过 + clippy -D warnings 零警告；rustc 1.85→1.96（zvariant 需 ≥1.87）；
+  tauri-build 在 cargo build 期即校验 externalBin（研究#7 未覆盖）——binaries/ 需先放 agent 副本。
+- e2e 扩展验证 PRD 1s 可见性：双 ws/ui 客户端 switch 后 1s 内 state_changed、第 5 请求 usage_tick。
+- Docker 两坑：容器内 proxy.golang.org 不通（GOPROXY 构建参数化）；非 root + 匿名卷 /data root
+  属主致 SQLite 打不开（镜像内预建+chown；compose 改命名卷）。
+- 教训：后台命令 `cmd | tail` 吞退出码——两个"成功"的构建实为失败；此后一律显式回显 $?。
+- 遗留：三平台打包实机验证/updater 签名/Windows UAC（M4）；手机+桌面双端同开实测（部署后）；
+  spec/backend 回填继续挂 00-bootstrap-guidelines。
+
 ---
 
 ---

@@ -31,9 +31,20 @@ type Hub struct {
 	st        *store.Store
 	masterKey []byte
 
+	usageNotifier UsageNotifier // 可选：用量入库后通知 ws/ui（M3）
+
 	mu    sync.Mutex
 	conns map[string]*agentConn // device_id → live conn（同设备重连时旧连接被替换）
 }
+
+// UsageNotifier is told when fresh usage rows land, so the UI layer can push
+// usage_tick without realtime importing api (avoids the cycle).
+type UsageNotifier interface {
+	UsageInserted(inserted int, lastTS int64)
+}
+
+// SetUsageNotifier wires the UI channel; call before serving traffic.
+func (h *Hub) SetUsageNotifier(n UsageNotifier) { h.usageNotifier = n }
 
 type agentConn struct {
 	c      *websocket.Conn
@@ -142,6 +153,15 @@ func (h *Hub) ingestUsage(ctx context.Context, c *websocket.Conn, deviceID strin
 	}
 	log.Printf("realtime: device %s usage_batch %s: %d inserted, %d ignored",
 		deviceID, batch.BatchID, inserted, len(batch.Records)-inserted)
+	if inserted > 0 && h.usageNotifier != nil {
+		var lastTS int64
+		for _, r := range batch.Records {
+			if r.TS > lastTS {
+				lastTS = r.TS
+			}
+		}
+		h.usageNotifier.UsageInserted(inserted, lastTS)
+	}
 	ack, err := wire.NewEnvelope(wire.TypeUsageAck, wire.UsageAck{BatchID: batch.BatchID})
 	if err != nil {
 		log.Printf("realtime: build usage_ack: %v", err)

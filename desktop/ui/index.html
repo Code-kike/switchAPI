@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>switchAPI</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <!-- 本地引导页（design.md §4）：向导 / 连接中 / 应急 三视图。
+         Hub 可达时 Rust 侧直接 navigate 到 Hub URL，本页即被替换。 -->
+    <main id="app">
+      <!-- 首启向导 -->
+      <section id="view-wizard" class="view" hidden>
+        <h1>switchAPI</h1>
+        <p class="muted">输入 Hub 服务器地址完成初始化（例如 http://192.168.1.10:8080）。</p>
+        <form id="wizard-form">
+          <input id="hub-url" type="url" placeholder="http://hub 主机:8080" required />
+          <button type="submit" id="btn-connect">连接</button>
+        </form>
+        <p id="wizard-error" class="error" hidden></p>
+      </section>
+
+      <!-- 连接中 -->
+      <section id="view-connecting" class="view" hidden>
+        <h1>连接中…</h1>
+        <p class="muted" id="connecting-target"></p>
+      </section>
+
+      <!-- 应急页：Hub 不可达 -->
+      <section id="view-emergency" class="view" hidden>
+        <h1>Hub 不可达</h1>
+        <p class="muted">
+          无法连接 <span id="emergency-hub"></span>。各设备的 Claude Code / Codex
+          仍按本机 Agent 缓存的路由正常工作。
+        </p>
+        <div class="actions">
+          <button id="btn-retry">重试连接</button>
+          <button id="btn-change" class="secondary">修改地址</button>
+        </div>
+        <h2>本机 Agent</h2>
+        <pre id="agent-status" class="status-box">读取中…</pre>
+        <div class="actions">
+          <button id="btn-agent-install" class="secondary">安装并启动</button>
+          <button id="btn-agent-start" class="secondary">启动</button>
+          <button id="btn-agent-stop" class="secondary">停止</button>
+        </div>
+        <p id="agent-error" class="error" hidden></p>
+      </section>
+    </main>
+    <script src="main.js"></script>
+  </body>
+</html>

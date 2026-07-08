@@ -1,0 +1,5 @@
+{"file": ".trellis/tasks/07-05-m3-dual-experience/prd.md", "reason": "M3 需求/约束/验收标准"}
+{"file": ".trellis/tasks/07-05-m3-dual-experience/design.md", "reason": "ws/ui 契约、embed 方案、SPA/Tauri 架构、worker 所有权（先读再动手）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/design.md", "reason": "全局技术设计：§3 接口面 §8 桌面壳 §9 交付物"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/07-tauri-agent-distribution.md", "reason": "Tauri 2 sidecar/托盘/自启/更新/远程 URL/cookie 全实证（W-C 必读）"}
+{"file": "CONTEXT.md", "reason": "领域术语表"}

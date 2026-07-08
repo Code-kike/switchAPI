@@ -15,6 +15,9 @@ go.work.sum
 # ---- Node / 前端（web，M3 起） ----
 node_modules/
 web/dist/
+# embed 的真实 SPA 产物不入库，仅保留占位 index.html（make web 覆盖后可 checkout 还原）
+internal/hub/webui/dist/*
+!internal/hub/webui/dist/index.html
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
@@ -24,6 +27,8 @@ pnpm-debug.log*
 # ---- Tauri（desktop，M3 起） ----
 desktop/src-tauri/target/
 desktop/src-tauri/gen/
+# externalBin 分发副本（打包前由构建脚本放入，不入库）
+desktop/src-tauri/binaries/switchapi-agent-*
 
 # ---- SQLite（本地数据 / 快照，权威数据不入库） ----
 *.db

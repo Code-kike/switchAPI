@@ -100,7 +100,7 @@ func (s *Server) handleProviderCreate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.st.AppendEvent("provider", eventJSON(map[string]string{"action": "created", "id": p.ID, "name": p.Name}))
+	s.event("provider", eventJSON(map[string]string{"action": "created", "id": p.ID, "name": p.Name}))
 	created, _ := s.st.GetProvider(p.ID)
 	writeJSON(w, http.StatusCreated, s.view(created))
 }
@@ -178,7 +178,7 @@ func (s *Server) handleProviderDelete(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.st.AppendEvent("provider", eventJSON(map[string]string{"action": "deleted", "id": id}))
+	s.event("provider", eventJSON(map[string]string{"action": "deleted", "id": id}))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -272,9 +272,10 @@ func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.st.AppendEvent("switch", eventJSON(map[string]string{
+	s.event("switch", eventJSON(map[string]string{
 		"app": req.App, "from": from, "to": p.ID, "to_name": p.Name}))
-	s.broadcast()
+	s.broadcast()   // Agent 侧 config_push（内部先 bump config_rev）
+	s.NotifyState() // UI 侧 state_changed（在 broadcast 后取到新 rev）
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "app": req.App, "active": p.ID})
 }
 

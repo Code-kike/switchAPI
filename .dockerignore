@@ -1,0 +1,11 @@
+# 构建上下文瘦身：依赖与产物在镜像内各阶段自行生成。
+.git
+web/node_modules
+web/dist
+desktop
+dist
+data
+*.db
+*.db-wal
+*.db-shm
+.trellis

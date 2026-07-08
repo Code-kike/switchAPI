@@ -1,7 +1,7 @@
 // switchapi-hub —— 中心服务（Hub）入口。
 //
-// 职责（父 design.md §2/§3）：权威 SQLite、REST API、ws/agent 配置分发。
-// Web UI 托管与 ws/ui 在 M3 接入；统计聚合在 M2。
+// 职责（父 design.md §2/§3）：权威 SQLite、REST API、ws/agent 配置分发、
+// ws/ui 实时通知与 Web 控制台托管（embed）、用量汇聚与计价。
 package main
 
 import (
@@ -21,6 +21,7 @@ import (
 	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/realtime"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
+	"github.com/Code-kike/switchAPI/internal/hub/webui"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 	"github.com/Code-kike/switchAPI/internal/shared/version"
 )
@@ -81,10 +82,13 @@ func run(listen, dataDir string) error {
 
 	rt := realtime.New(st, masterKey)
 	apiSrv := api.New(st, masterKey, rt, resolver)
+	rt.SetUsageNotifier(apiSrv) // 用量入库 → ws/ui usage_tick
 
 	root := http.NewServeMux()
 	root.Handle("GET /api/v1/ws/agent", rt.Handler())
-	root.Handle("/", apiSrv.Handler())
+	root.Handle("/api/", apiSrv.Handler())
+	root.Handle("GET /healthz", apiSrv.Handler())
+	root.Handle("/", webui.Handler())
 
 	srv := &http.Server{
 		Addr:              listen,
@@ -106,7 +110,8 @@ func run(listen, dataDir string) error {
 		}
 	case <-ctx.Done():
 		log.Println("收到退出信号，优雅关闭中…")
-		rt.CloseAll() // WS 为 hijacked 连接，Shutdown 不会关它们
+		rt.CloseAll()    // WS 为 hijacked 连接，Shutdown 不会关它们
+		apiSrv.CloseUI() // ws/ui 同理
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdownCtx)

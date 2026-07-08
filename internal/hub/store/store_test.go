@@ -160,10 +160,10 @@ func TestDevices(t *testing.T) {
 
 func TestEventsAndSettings(t *testing.T) {
 	s := openTest(t)
-	if err := s.AppendEvent("switch", `{"app":"claude-code"}`); err != nil {
+	if _, err := s.AppendEvent("switch", `{"app":"claude-code"}`); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.AppendEvent("pairing", ""); err != nil {
+	if _, err := s.AppendEvent("pairing", ""); err != nil {
 		t.Fatal(err)
 	}
 	evs, err := s.RecentEvents(10)

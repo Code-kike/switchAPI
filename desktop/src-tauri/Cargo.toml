@@ -1,0 +1,24 @@
+[package]
+name = "switchapi-desktop"
+version = "0.1.0"
+description = "switchAPI 桌面壳：装载 Hub 控制台 + 托盘快切 + Agent 托管"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+url = "2"
+dirs = "6"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
