@@ -56,7 +56,7 @@
 - [x] docker build + 容器 healthz/SPA/api 三探通过（发现并修 /data 卷属主与容器内 GOPROXY 两坑）
 - [x] 全量门禁：`go mod tidy`（零漂移）、build/vet/test、race（forward+e2e）、gofmt、pnpm build、
   cargo build+clippy
-- [ ] commit + push + CI 确认
+- [x] commit + push + CI 确认（d241f72，run 28918948641 success，含首跑 web job）
 
 ## 验证命令
 
