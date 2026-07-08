@@ -3,24 +3,6 @@
 > AI development session journal
 > Started: 2026-07-02
 
-## 2026-07-08 — M4 可靠性与迁移完成（任务 07-08-m4-reliability-migration）
-
-- 全程主会话内联分波（W1-W6），未派子代理（上轮 5 派 5 亡的中转站环境未变）。
-- 交付：wire 五消息族 + ConfigPush.FallbackRoutes（本地降级前提）；Agent health 四分类计数器
-  （硬 3 连/300s 新鲜度、429 6 次跨 60s、401/403 三连）+ 四类超时（M1 TODO 兑现，含流中静默看门狗）
-  + probe 执行器 + 断连本地降级（dwell 60s）；Hub failover 引擎（5s 防抖、负证据否决、限速 10s、
-  冷却 300×2^n≤3600、恢复探测 2 连不切回）+ speedtest 聚合；备份轮转 + scrypt 口令加密导出/导入 +
-  CSV + cc-switch 导入器（按列名、E1-E9、v2 json 兜底 v1 拒绝）；SPA 设置页/健康标记/测速面板/
-  failover toast。
-- 关键补洞：Transport 级失败此前不产生 usage 记录（健康判定主信号缺失）→ ErrorHandler 补记账；
-  客户端挂断与上游断流分类拆开（client_abort 不计健康）。
-- race 抓真 bug：SpeedtestLatest 浅拷贝 map 在锁外序列化与写入竞争 → 深拷贝。
-- backup 秒级文件名同秒撞车（VACUUM INTO 拒绝覆盖）→ 毫秒精度。
-- M4 e2e 一次通过（0.5s）：断 A→3 硬失败→仲裁切 B→双端通知→A 复活→探测恢复不切回→测速回报。
-- 遗留：父 prd §5 两机实机验收清单（部署后人工）；MVP 四里程碑代码面至此全部完成。
-
----
-
 ## 2026-07-03/04 — M0 研究与地基执行（任务 07-02-switchapi-mvp-plan）
 
 - Phase 1.3/1.4 补齐：implement.jsonl / check.jsonl 从模板填充为正式清单；任务已 in_progress。
@@ -74,6 +56,24 @@
 - 教训：后台命令 `cmd | tail` 吞退出码——两个"成功"的构建实为失败；此后一律显式回显 $?。
 - 遗留：三平台打包实机验证/updater 签名/Windows UAC（M4）；手机+桌面双端同开实测（部署后）；
   spec/backend 回填继续挂 00-bootstrap-guidelines。
+
+## 2026-07-08 — M4 可靠性与迁移完成（任务 07-08-m4-reliability-migration）
+
+- 全程主会话内联分波（W1-W6），未派子代理（上轮 5 派 5 亡的中转站环境未变）。
+- 交付：wire 五消息族 + ConfigPush.FallbackRoutes（本地降级前提）；Agent health 四分类计数器
+  （硬 3 连/300s 新鲜度、429 6 次跨 60s、401/403 三连）+ 四类超时（M1 TODO 兑现，含流中静默看门狗）
+  + probe 执行器 + 断连本地降级（dwell 60s）；Hub failover 引擎（5s 防抖、负证据否决、限速 10s、
+  冷却 300×2^n≤3600、恢复探测 2 连不切回）+ speedtest 聚合；备份轮转 + scrypt 口令加密导出/导入 +
+  CSV + cc-switch 导入器（按列名、E1-E9、v2 json 兜底 v1 拒绝）；SPA 设置页/健康标记/测速面板/
+  failover toast。
+- 关键补洞：Transport 级失败此前不产生 usage 记录（健康判定主信号缺失）→ ErrorHandler 补记账；
+  客户端挂断与上游断流分类拆开（client_abort 不计健康）。
+- race 抓真 bug：SpeedtestLatest 浅拷贝 map 在锁外序列化与写入竞争 → 深拷贝。
+- backup 秒级文件名同秒撞车（VACUUM INTO 拒绝覆盖）→ 毫秒精度。
+- M4 e2e 一次通过（0.5s）：断 A→3 硬失败→仲裁切 B→双端通知→A 复活→探测恢复不切回→测速回报。
+- 遗留：父 prd §5 两机实机验收清单（部署后人工）；MVP 四里程碑代码面至此全部完成。
+
+---
 
 ---
 
