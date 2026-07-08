@@ -21,7 +21,8 @@
   "children": [
     "07-04-m1-data-forwarding",
     "07-04-m2-stats-pricing",
-    "07-05-m3-dual-experience"
+    "07-05-m3-dual-experience",
+    "07-08-m4-reliability-migration"
   ],
   "parent": null,
   "relatedFiles": [],

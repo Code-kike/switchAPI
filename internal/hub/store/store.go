@@ -47,6 +47,13 @@ func (s *Store) Close() error { return s.db.Close() }
 // DB exposes the raw handle for e2e assertions and the M2 aggregation layer.
 func (s *Store) DB() *sql.DB { return s.db }
 
+// VacuumInto writes a consistent snapshot of the whole database to destPath
+// (备份快照，父 design.md §7)。目标文件不能已存在（SQLite 语义）。
+func (s *Store) VacuumInto(destPath string) error {
+	_, err := s.db.Exec(`VACUUM INTO ?`, destPath)
+	return err
+}
+
 func (s *Store) migrate() error {
 	entries, err := migrationsFS.ReadDir("migrations")
 	if err != nil {

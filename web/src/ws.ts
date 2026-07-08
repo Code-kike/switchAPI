@@ -2,6 +2,7 @@
 // 三类下行都是"失效通知"——只做 react-query invalidate，让对应查询 refetch。
 
 import type { QueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import type { WsEnvelope } from '@/api/types'
 
 let socket: WebSocket | null = null
@@ -47,9 +48,11 @@ function connect(qc: QueryClient) {
         qc.invalidateQueries({ queryKey: ['stats'] })
         qc.invalidateQueries({ queryKey: ['usage'] })
         break
-      case 'event':
+      case 'event': {
         qc.invalidateQueries({ queryKey: ['events'] })
+        notifyReliabilityEvent(qc, env.payload)
         break
+      }
     }
   }
 
@@ -61,5 +64,28 @@ function connect(qc: QueryClient) {
     setTimeout(() => {
       if (!stopped && !socket) connect(qc)
     }, delay)
+  }
+}
+
+// failover/probe 事件 → 即时 toast（双端可见通知：桌面壳装载同一 SPA）。
+function notifyReliabilityEvent(qc: QueryClient, payload: unknown) {
+  const ev = payload as { kind?: string; payload?: Record<string, string> }
+  const p = ev?.payload ?? {}
+  if (ev?.kind === 'failover') {
+    qc.invalidateQueries({ queryKey: ['health'] })
+    if (p.action === 'switched') {
+      toast.warning(`故障切换：${p.app} 已从「${p.from_name}」切到「${p.to_name}」`, { duration: 10000 })
+    } else if (p.action === 'no_candidate') {
+      toast.error(`「${p.provider}」故障，且备选序列没有健康候选（保持当前供应商）`, { duration: 10000 })
+    } else if (p.action === 'vetoed') {
+      toast.info(`「${p.provider}」的故障上报被否决：${p.reason}`, { duration: 8000 })
+    }
+  } else if (ev?.kind === 'probe') {
+    qc.invalidateQueries({ queryKey: ['health'] })
+    if (p.action === 'recovered') {
+      toast.success(`「${p.provider}」已恢复，可一键切回`, { duration: 10000 })
+    }
+  } else if (ev?.kind === 'speedtest' && p.action === 'completed') {
+    qc.invalidateQueries({ queryKey: ['speedtest'] })
   }
 }

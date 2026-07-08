@@ -123,3 +123,27 @@ func (s *Store) GetPricingOverrides() ([]PricingOverride, error) {
 	}
 	return out, rows.Err()
 }
+
+// UpsertPricingOverrides replaces/creates override rows（导入还原用）。
+func (s *Store) UpsertPricingOverrides(rows []PricingOverride) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, o := range rows {
+		if _, err := tx.Exec(`INSERT INTO pricing_overrides
+			(provider_id, model, input_cost, output_cost, cache_write_cost, cache_read_cost)
+			VALUES (?,?,?,?,?,?)
+			ON CONFLICT(provider_id, model) DO UPDATE SET input_cost=excluded.input_cost,
+			output_cost=excluded.output_cost, cache_write_cost=excluded.cache_write_cost,
+			cache_read_cost=excluded.cache_read_cost`,
+			o.ProviderID, o.Model, o.InputCost, o.OutputCost, o.CacheWriteCost, o.CacheReadCost); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}

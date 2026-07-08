@@ -32,6 +32,7 @@ type Hub struct {
 	masterKey []byte
 
 	usageNotifier UsageNotifier // 可选：用量入库后通知 ws/ui（M3）
+	reports       ReportHandler // 可选：health/probe/speedtest 上行处理（M4）
 
 	mu    sync.Mutex
 	conns map[string]*agentConn // device_id → live conn（同设备重连时旧连接被替换）
@@ -45,6 +46,60 @@ type UsageNotifier interface {
 
 // SetUsageNotifier wires the UI channel; call before serving traffic.
 func (h *Hub) SetUsageNotifier(n UsageNotifier) { h.usageNotifier = n }
+
+// ReportHandler consumes reliability uplink messages (M4). Handlers run on
+// their own goroutine — the read loop never blocks on arbitration.
+type ReportHandler interface {
+	HandleHealthReport(deviceID string, r wire.HealthReport)
+	HandleProbeResult(deviceID string, r wire.ProbeResult)
+	HandleSpeedtestResult(deviceID string, r wire.SpeedtestResult)
+}
+
+// SetReportHandler wires the failover/speedtest engine; call before serving.
+func (h *Hub) SetReportHandler(rh ReportHandler) { h.reports = rh }
+
+// SendTo delivers one envelope to a specific device (probe_cmd 定向下发).
+func (h *Hub) SendTo(deviceID string, env wire.Envelope) error {
+	h.mu.Lock()
+	conn, ok := h.conns[deviceID]
+	h.mu.Unlock()
+	if !ok {
+		return errDeviceOffline
+	}
+	return sendEnvelope(conn.ctx, conn.c, env)
+}
+
+// BroadcastEnvelope fans one envelope to every live agent (speedtest_cmd).
+func (h *Hub) BroadcastEnvelope(env wire.Envelope) {
+	h.mu.Lock()
+	targets := make([]*agentConn, 0, len(h.conns))
+	for _, c := range h.conns {
+		targets = append(targets, c)
+	}
+	h.mu.Unlock()
+	for _, conn := range targets {
+		if err := sendEnvelope(conn.ctx, conn.c, env); err != nil {
+			log.Printf("realtime: broadcast envelope: %v", err)
+		}
+	}
+}
+
+// OnlineDevices lists currently connected device ids（探测轮转的候选池）.
+func (h *Hub) OnlineDevices() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]string, 0, len(h.conns))
+	for id := range h.conns {
+		out = append(out, id)
+	}
+	return out
+}
+
+var errDeviceOffline = errOffline{}
+
+type errOffline struct{}
+
+func (errOffline) Error() string { return "device offline" }
 
 type agentConn struct {
 	c      *websocket.Conn
@@ -130,6 +185,21 @@ func (h *Hub) serveWS(w http.ResponseWriter, r *http.Request) {
 		case wire.TypeUsageBatch:
 			if err := h.ingestUsage(ctx, c, dev.ID, env); err != nil {
 				return // write failed → let the Agent reconnect and retry
+			}
+		case wire.TypeHealthReport:
+			var r wire.HealthReport
+			if env.Decode(&r) == nil && h.reports != nil {
+				go h.reports.HandleHealthReport(dev.ID, r)
+			}
+		case wire.TypeProbeResult:
+			var r wire.ProbeResult
+			if env.Decode(&r) == nil && h.reports != nil {
+				go h.reports.HandleProbeResult(dev.ID, r)
+			}
+		case wire.TypeSpeedtestResult:
+			var r wire.SpeedtestResult
+			if env.Decode(&r) == nil && h.reports != nil {
+				go h.reports.HandleSpeedtestResult(dev.ID, r)
 			}
 		}
 	}
@@ -248,11 +318,13 @@ func sendEnvelope(ctx context.Context, c *websocket.Conn, env wire.Envelope) err
 }
 
 // buildPush assembles the full snapshot: active provider per App (api key
-// decrypted — LAN trust, ADR-0005) + fallback orders + current rev.
+// decrypted — LAN trust, ADR-0005) + fallback orders WITH full routes (M4:
+// 本地临时降级需要备选的 key 才能自行切换) + current rev.
 func (h *Hub) buildPush() (wire.ConfigPush, error) {
 	push := wire.ConfigPush{
 		Apps:           map[string]wire.AppRoute{},
 		FallbackOrders: map[string][]string{},
+		FallbackRoutes: map[string][]wire.AppRoute{},
 	}
 	rev, err := h.currentRev()
 	if err != nil {
@@ -261,31 +333,48 @@ func (h *Hub) buildPush() (wire.ConfigPush, error) {
 	push.Rev = rev
 
 	for _, app := range []string{"claude-code", "codex"} {
-		st, err := h.st.GetAppState(app)
-		if err != nil {
-			continue // 尚未切换过该 App
+		if st, err := h.st.GetAppState(app); err == nil {
+			if route, err := h.routeFor(st.ActiveProviderID); err == nil {
+				push.Apps[app] = route
+			} else {
+				log.Printf("realtime: app %s active provider %s: %v", app, st.ActiveProviderID, err)
+			}
 		}
-		p, err := h.st.GetProvider(st.ActiveProviderID)
-		if err != nil {
-			log.Printf("realtime: app %s points at missing provider %s", app, st.ActiveProviderID)
+		order, err := h.st.GetFallbackOrder(app)
+		if err != nil || len(order) == 0 {
 			continue
 		}
-		plain, err := cryptoutil.Open(h.masterKey, p.APIKeyEnc)
-		if err != nil {
-			log.Printf("realtime: decrypt key for provider %s: %v", p.ID, err)
-			continue
+		push.FallbackOrders[app] = order
+		routes := make([]wire.AppRoute, 0, len(order))
+		for _, pid := range order {
+			route, err := h.routeFor(pid)
+			if err != nil {
+				log.Printf("realtime: fallback route %s: %v", pid, err)
+				continue
+			}
+			routes = append(routes, route)
 		}
-		redirects := map[string]string{}
-		json.Unmarshal([]byte(p.ModelRedirects), &redirects)
-		push.Apps[app] = wire.AppRoute{
-			ProviderID: p.ID, Name: p.Name, Protocol: p.Protocol,
-			BaseURL: p.BaseURL, APIKey: string(plain), ModelRedirects: redirects,
-		}
-		if order, err := h.st.GetFallbackOrder(app); err == nil && len(order) > 0 {
-			push.FallbackOrders[app] = order
-		}
+		push.FallbackRoutes[app] = routes
 	}
 	return push, nil
+}
+
+// routeFor loads and decrypts one provider into a wire route.
+func (h *Hub) routeFor(providerID string) (wire.AppRoute, error) {
+	p, err := h.st.GetProvider(providerID)
+	if err != nil {
+		return wire.AppRoute{}, err
+	}
+	plain, err := cryptoutil.Open(h.masterKey, p.APIKeyEnc)
+	if err != nil {
+		return wire.AppRoute{}, err
+	}
+	redirects := map[string]string{}
+	json.Unmarshal([]byte(p.ModelRedirects), &redirects)
+	return wire.AppRoute{
+		ProviderID: p.ID, Name: p.Name, Protocol: p.Protocol,
+		BaseURL: p.BaseURL, APIKey: string(plain), ModelRedirects: redirects,
+	}, nil
 }
 
 func (h *Hub) currentRev() (int64, error) {

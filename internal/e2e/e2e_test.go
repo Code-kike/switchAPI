@@ -19,13 +19,16 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/Code-kike/switchAPI/internal/agent/forward"
+	"github.com/Code-kike/switchAPI/internal/agent/health"
 	"github.com/Code-kike/switchAPI/internal/agent/hubclient"
 	"github.com/Code-kike/switchAPI/internal/agent/usagebuf"
 	"github.com/Code-kike/switchAPI/internal/hub/api"
+	"github.com/Code-kike/switchAPI/internal/hub/failover"
 	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/realtime"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
@@ -36,12 +39,14 @@ import (
 )
 
 // fakeUpstream is a minimal Anthropic-flavored SSE provider whose message id
-// carries its name, so responses reveal which upstream served them.
+// carries its name, so responses reveal which upstream served them. Flip
+// failing to simulate an outage (503 on every request, incl. probes).
 type fakeUpstream struct {
-	name string
-	mu   sync.Mutex
-	hits int
-	auth string
+	name    string
+	failing atomic.Bool
+	mu      sync.Mutex
+	hits    int
+	auth    string
 }
 
 func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -54,6 +59,13 @@ func (f *fakeUpstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.hits++
 	f.auth = r.Header.Get("X-Api-Key")
 	f.mu.Unlock()
+
+	if f.failing.Load() {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		io.WriteString(w, `{"error":{"type":"overloaded","message":"synthetic outage"}}`)
+		return
+	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	rc := http.NewResponseController(w)
@@ -76,10 +88,11 @@ func (f *fakeUpstream) snapshot() (int, string) {
 
 // hubProc is one Hub "process": store-backed api+realtime on a fixed address.
 type hubProc struct {
-	srv *http.Server
-	ln  net.Listener
-	rt  *realtime.Hub
-	api *api.Server
+	srv        *http.Server
+	ln         net.Listener
+	rt         *realtime.Hub
+	api        *api.Server
+	stopEngine context.CancelFunc
 }
 
 func startHub(t *testing.T, st *store.Store, key []byte, addr string) *hubProc {
@@ -94,6 +107,20 @@ func startHub(t *testing.T, st *store.Store, key []byte, addr string) *hubProc {
 	rt := realtime.New(st, key)
 	apiSrv := api.New(st, key, rt, resolver)
 	rt.SetUsageNotifier(apiSrv) // 用量入库 → ws/ui usage_tick（与 cmd/hub 相同接线）
+
+	// M4：故障切换引擎（测试用快节奏参数）。
+	engine := failover.New(st, key, rt, apiSrv, failover.Config{
+		DebounceWindow: 50 * time.Millisecond, VetoWindow: 30,
+		FailoverMinGap: 100 * time.Millisecond,
+		ProbeBase:      50 * time.Millisecond, ProbeMax: 200 * time.Millisecond,
+		ProbeTimeoutS: 5, ProbeScan: 20 * time.Millisecond,
+		SpeedtestExpiry: time.Minute,
+	})
+	rt.SetReportHandler(engine)
+	apiSrv.SetReliability(engine)
+	ectx, ecancel := context.WithCancel(context.Background())
+	go engine.Run(ectx)
+
 	root := http.NewServeMux()
 	root.Handle("GET /api/v1/ws/agent", rt.Handler())
 	root.Handle("/", apiSrv.Handler())
@@ -103,10 +130,11 @@ func startHub(t *testing.T, st *store.Store, key []byte, addr string) *hubProc {
 	}
 	srv := &http.Server{Handler: root, ReadHeaderTimeout: 5 * time.Second}
 	go srv.Serve(ln)
-	return &hubProc{srv: srv, ln: ln, rt: rt, api: apiSrv}
+	return &hubProc{srv: srv, ln: ln, rt: rt, api: apiSrv, stopEngine: ecancel}
 }
 
 func (h *hubProc) stop() {
+	h.stopEngine()
 	h.rt.CloseAll() // 模拟进程死亡：hijacked WS 必须显式断开
 	h.api.CloseUI() // ws/ui 同理
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -444,4 +472,190 @@ func TestM1EndToEnd(t *testing.T) {
 			t.Fatalf("ui client %d usage_tick = %+v", i+1, tk)
 		}
 	}
+}
+
+// TestM4FailoverEndToEnd walks the reliability chain (M4 prd 验收 #1/#3)：
+// 打断上游 A → Agent 连续 3 次硬失败 → health_report → Hub 仲裁沿备选切到 B
+// （Agent 新路由 + ws/ui failover 事件 + state_changed）→ A 复活 → 恢复探测
+// 连续 2 次成功 → recovered 事件且不自动切回 → 手动测速按设备回报。
+func TestM4FailoverEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	st, err := store.Open(filepath.Join(dir, "hub.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	key, err := cryptoutil.LoadOrCreateMasterKey(filepath.Join(dir, "master.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	upA, upB := &fakeUpstream{name: "A"}, &fakeUpstream{name: "B"}
+	srvA, srvB := httptest.NewServer(upA), httptest.NewServer(upB)
+	defer srvA.Close()
+	defer srvB.Close()
+
+	hub := startHub(t, st, key, "127.0.0.1:0")
+	defer hub.stop()
+	hubURL := "http://" + hub.ln.Addr().String()
+	admin := newAdmin(t, hubURL)
+
+	var pA, pB struct {
+		ID string `json:"id"`
+	}
+	json.Unmarshal(admin.post("/api/v1/providers", fmt.Sprintf(
+		`{"name":"A","protocol":"anthropic","base_url":%q,"api_key":"sk-m4-aaaa"}`, srvA.URL), 201), &pA)
+	json.Unmarshal(admin.post("/api/v1/providers", fmt.Sprintf(
+		`{"name":"B","protocol":"anthropic","base_url":%q,"api_key":"sk-m4-bbbb"}`, srvB.URL), 201), &pB)
+	admin.post("/api/v1/fallback-order/claude-code", "", 405) // sanity: PUT only
+	req, _ := http.NewRequest("PUT", hubURL+"/api/v1/fallback-order/claude-code",
+		strings.NewReader(`{"provider_ids":["`+pA.ID+`","`+pB.ID+`"]}`))
+	req.Header.Set("Content-Type", "application/json")
+	if resp, err := admin.cli.Do(req); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("set fallback order: %v", err)
+	}
+	admin.post("/api/v1/switch", `{"app":"claude-code","provider_id":"`+pA.ID+`"}`, 200)
+
+	var pc struct {
+		Code string `json:"code"`
+	}
+	json.Unmarshal(admin.post("/api/v1/devices/pairing-code", `{}`, 200), &pc)
+	statePath := filepath.Join(dir, "agent-state.json")
+	state, err := hubclient.Pair(hubURL, pc.Code, "m4-dev", statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Agent 栈：cli.go 同构接线——sink 同时喂用量队列与健康计数器。
+	buf, err := usagebuf.Open(filepath.Join(dir, "agent.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer buf.Close()
+	var client *hubclient.Client
+	tracker := health.New(health.DefaultConfig(), func(r wire.HealthReport) {
+		client.ReportHealth(r)
+	})
+	fwd := forward.New(state.LocalToken, func(u forward.Usage) {
+		buf.Enqueue(u.ToRecord())
+		tracker.Observe(u)
+	})
+	fwdSrv := httptest.NewServer(fwd.Handler())
+	defer fwdSrv.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client = hubclient.New(statePath, state, fwd)
+	client.UseQueue(buf)
+	go client.Run(ctx)
+
+	waitFor(t, "initial push (A active)", 10*time.Second, func() bool {
+		tb := fwd.Table()
+		return tb.Anthropic != nil && tb.Anthropic.ProviderID == pA.ID
+	})
+
+	ask := func() (int, string) {
+		req, _ := http.NewRequest("POST", fwdSrv.URL+"/anthropic/v1/messages",
+			strings.NewReader(`{"model":"claude-haiku-4-5","stream":true,"max_tokens":8,"messages":[]}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+state.LocalToken)
+		resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+		if err != nil {
+			t.Fatalf("request via agent: %v", err)
+		}
+		defer resp.Body.Close()
+		raw, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(raw)
+	}
+
+	// ws/ui 观察端。
+	dialUI := func() *websocket.Conn {
+		u, _ := url.Parse(hubURL)
+		h := http.Header{}
+		for _, c := range admin.cli.Jar.Cookies(u) {
+			h.Add("Cookie", c.Name+"="+c.Value)
+		}
+		dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer dcancel()
+		c, _, err := websocket.Dial(dctx, "ws"+strings.TrimPrefix(hubURL, "http")+"/api/v1/ws/ui",
+			&websocket.DialOptions{HTTPHeader: h})
+		if err != nil {
+			t.Fatalf("dial ws/ui: %v", err)
+		}
+		return c
+	}
+	ui := dialUI()
+	defer ui.CloseNow()
+	readEventUntil := func(match func(kind string, payload string) bool, timeout time.Duration, what string) {
+		deadline := time.Now().Add(timeout)
+		for {
+			rctx, rcancel := context.WithDeadline(context.Background(), deadline)
+			var env wire.Envelope
+			err := wsjson.Read(rctx, ui, &env)
+			rcancel()
+			if err != nil {
+				t.Fatalf("ws/ui waiting for %s: %v", what, err)
+			}
+			if env.Type != wire.TypeUIEvent {
+				continue
+			}
+			var ev wire.UIEvent
+			if env.Decode(&ev) != nil {
+				continue
+			}
+			if match(ev.Kind, string(ev.Payload)) {
+				return
+			}
+		}
+	}
+
+	// 健康路径先行确认。
+	if code, out := ask(); code != 200 || !strings.Contains(out, "msg_A") {
+		t.Fatalf("healthy request = %d %s", code, out)
+	}
+
+	// ---- 打断 A：连续硬失败 → failover 到 B ----
+	upA.failing.Store(true)
+	for i := 0; i < 3; i++ {
+		if code, _ := ask(); code != 503 {
+			t.Fatalf("outage request #%d = %d, want 503", i+1, code)
+		}
+	}
+	waitFor(t, "failover switch lands on agent (B active)", 10*time.Second, func() bool {
+		tb := fwd.Table()
+		return tb.Anthropic != nil && tb.Anthropic.ProviderID == pB.ID
+	})
+	readEventUntil(func(kind, payload string) bool {
+		return kind == "failover" && strings.Contains(payload, `"action":"switched"`) &&
+			strings.Contains(payload, `"to":"`+pB.ID+`"`)
+	}, 5*time.Second, "failover switched event")
+	if code, out := ask(); code != 200 || !strings.Contains(out, "msg_B") {
+		t.Fatalf("post-failover request = %d %s", code, out)
+	}
+
+	// ---- A 复活：恢复探测（Agent 执行）→ recovered 事件；不自动切回 ----
+	upA.failing.Store(false)
+	readEventUntil(func(kind, payload string) bool {
+		return kind == "probe" && strings.Contains(payload, `"action":"recovered"`)
+	}, 15*time.Second, "probe recovered event")
+	code, raw := admin.get("/api/v1/state")
+	if code != 200 || !strings.Contains(string(raw), pB.ID) {
+		t.Fatalf("auto failback happened? state = %s", raw)
+	}
+
+	// ---- 手动测速：按设备回报全部供应商 ----
+	admin.post("/api/v1/speedtest", `{}`, 200)
+	waitFor(t, "speedtest results from our device", 15*time.Second, func() bool {
+		code, raw := admin.get("/api/v1/speedtest/latest")
+		if code != 200 {
+			return false
+		}
+		var run struct {
+			Results map[string][]wire.ProbeResult `json:"results"`
+		}
+		if json.Unmarshal(raw, &run) != nil {
+			return false
+		}
+		rs, ok := run.Results[state.DeviceID]
+		return ok && len(rs) == 2
+	})
 }

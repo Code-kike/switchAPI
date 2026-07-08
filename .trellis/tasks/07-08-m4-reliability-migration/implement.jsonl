@@ -1,0 +1,6 @@
+{"file": ".trellis/tasks/07-08-m4-reliability-migration/prd.md", "reason": "M4 需求/约束/验收"}
+{"file": ".trellis/tasks/07-08-m4-reliability-migration/design.md", "reason": "wire 契约、failover 流程落位、导入导出格式、波次划分"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/08-health-thresholds.md", "reason": "健康判定/仲裁/探测 20 条参数表（实现规格）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/research/05-cc-switch-format.md", "reason": "cc-switch 映射表 + E1-E9 边界（导入器规格）"}
+{"file": ".trellis/tasks/07-02-switchapi-mvp-plan/design.md", "reason": "父设计 §5 故障切换流程 §7 备份导出导入"}
+{"file": "CONTEXT.md", "reason": "领域术语表"}

@@ -8,6 +8,7 @@ import ProvidersPage from '@/pages/providers'
 import UsagePage from '@/pages/usage'
 import DevicesPage from '@/pages/devices'
 import EventsPage from '@/pages/events'
+import SettingsPage from '@/pages/settings'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -27,6 +28,7 @@ export default function App() {
             <Route path="/usage" element={<UsagePage />} />
             <Route path="/devices" element={<DevicesPage />} />
             <Route path="/events" element={<EventsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

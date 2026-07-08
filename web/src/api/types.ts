@@ -134,3 +134,43 @@ export interface WsUsageTick {
   inserted: number
   last_ts: number
 }
+
+// ---- M4 可靠性 ----
+
+// store.ProviderHealth
+export interface ProviderHealth {
+  provider_id: string
+  demote_count: number
+  cooldown_until: number
+  needs_attention: boolean
+  last_probe_at: number
+  consecutive_probe_ok: number
+}
+
+// backup.Info
+export interface BackupInfo {
+  name: string
+  size_bytes: number
+  created_at: number
+}
+
+// failover.SpeedtestRun
+export interface ProbeResult {
+  provider_id: string
+  ok: boolean
+  status?: number
+  latency_ms: number
+  error?: string
+}
+
+export interface SpeedtestRun {
+  id: string
+  started_at: number
+  expected_devices: string[]
+  results: Record<string, ProbeResult[]>
+}
+
+export interface CCSwitchImportResp {
+  imported: Array<{ app: string; name: string }>
+  skipped: Array<{ app: string; name: string; reason: string }>
+}

@@ -19,9 +19,12 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Code-kike/switchAPI/internal/agent/forward"
+	"github.com/Code-kike/switchAPI/internal/agent/probe"
 	"github.com/Code-kike/switchAPI/internal/agent/usagebuf"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
 	"github.com/Code-kike/switchAPI/internal/shared/version"
@@ -172,11 +175,96 @@ type Client struct {
 	state     *State
 	fwd       *forward.Server
 	buf       *usagebuf.Queue // optional usage queue; nil → no reporting (M1 behavior)
+
+	healthCh  chan wire.HealthReport // 边沿触发的健康上报（连接期间由 writer 消费）
+	connected atomic.Bool
+
+	mu         sync.Mutex
+	localRoute map[string]wire.AppRoute // 断连期本地临时降级的覆盖（app → 路由）
+	lastLocal  map[string]time.Time     // 每 App 上次本地切换时刻（dwell ≥60s）
 }
 
 // New builds a client around a loaded state.
 func New(statePath string, st *State, fwd *forward.Server) *Client {
-	return &Client{statePath: statePath, state: st, fwd: fwd}
+	return &Client{statePath: statePath, state: st, fwd: fwd,
+		healthCh:   make(chan wire.HealthReport, 16),
+		localRoute: map[string]wire.AppRoute{},
+		lastLocal:  map[string]time.Time{},
+	}
+}
+
+// ReportHealth is the health.Tracker notifier. Connected → ship the report to
+// the Hub (它裁决)。断连 → 本地临时降级（research/08 #20：同阈值本地判定，
+// dwell 60s，重连后由 config_push 对齐全局状态）。
+func (c *Client) ReportHealth(r wire.HealthReport) {
+	if c.connected.Load() {
+		select {
+		case c.healthCh <- r:
+		default:
+			log.Printf("hubclient: health_report 队列满，丢弃 %s/%s", r.App, r.ProviderID)
+		}
+		return
+	}
+	c.localDowngrade(r)
+}
+
+// localDowngrade swaps this app to the next fallback candidate using the
+// cached FallbackRoutes（含 key）。找不到候选/序列为空/dwell 未到 → 原地不动。
+func (c *Client) localDowngrade(r wire.HealthReport) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if time.Since(c.lastLocal[r.App]) < 60*time.Second {
+		return
+	}
+	push := c.state.LastPush
+	if push == nil {
+		return
+	}
+	routes := push.FallbackRoutes[r.App]
+	if len(routes) == 0 {
+		return
+	}
+	// 当前生效 = 本地覆盖优先，否则推送里的 active。
+	current := r.ProviderID
+	if ov, ok := c.localRoute[r.App]; ok {
+		current = ov.ProviderID
+	}
+	idx := -1
+	for i, rt := range routes {
+		if rt.ProviderID == current {
+			idx = i
+			break
+		}
+	}
+	// 沿序列取下一个不同的候选（未在序列中 → 从头取第一个不同者）。
+	for step := 1; step <= len(routes); step++ {
+		cand := routes[(idx+step+len(routes))%len(routes)]
+		if cand.ProviderID != current {
+			c.localRoute[r.App] = cand
+			c.swapWithOverridesLocked()
+			c.lastLocal[r.App] = time.Now()
+			log.Printf("hubclient: [本地临时降级] %s → %s（Hub 断连，重连后对齐）", r.App, cand.Name)
+			return
+		}
+	}
+}
+
+// swapWithOverridesLocked rebuilds the routing table from the cached push and
+// applies local overrides. Caller holds c.mu.
+func (c *Client) swapWithOverridesLocked() {
+	push := c.state.LastPush
+	if push == nil {
+		return
+	}
+	merged := *push
+	merged.Apps = make(map[string]wire.AppRoute, len(push.Apps))
+	for app, rt := range push.Apps {
+		merged.Apps[app] = rt
+	}
+	for app, rt := range c.localRoute {
+		merged.Apps[app] = rt
+	}
+	c.fwd.Swap(BuildTable(&merged))
 }
 
 // UseQueue attaches the usage queue whose batches this client pumps to the Hub
@@ -230,10 +318,13 @@ func (c *Client) connectOnce(ctx context.Context) (healthy bool) {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer conn.Close(websocket.StatusNormalClosure, "bye")
+	c.connected.Store(true)
+	defer c.connected.Store(false)
 
 	// Single writer: coder/websocket permits one concurrent reader (the loop
 	// below) + one writer. The writer drains a send channel (hello, usage
-	// batches) and a 30s heartbeat ticker; everything outbound goes through it.
+	// batches, health reports) and a 30s heartbeat ticker; everything outbound
+	// goes through it.
 	send := make(chan wire.Envelope, 64)
 	go func() {
 		tick := time.NewTicker(30 * time.Second)
@@ -245,6 +336,15 @@ func (c *Client) connectOnce(ctx context.Context) (healthy bool) {
 			case env := <-send:
 				if err := writeEnv(cctx, conn, env); err != nil {
 					cancel() // wake the read loop to exit
+					return
+				}
+			case r := <-c.healthCh:
+				env, err := wire.NewEnvelope(wire.TypeHealthReport, r)
+				if err != nil {
+					continue
+				}
+				if err := writeEnv(cctx, conn, env); err != nil {
+					cancel()
 					return
 				}
 			case <-tick.C:
@@ -289,6 +389,9 @@ func (c *Client) connectOnce(ctx context.Context) (healthy bool) {
 				log.Printf("hubclient: 忽略过期推送 rev=%d（本地 rev=%d）", push.Rev, c.state.LastPush.Rev)
 				continue
 			}
+			c.mu.Lock()
+			c.localRoute = map[string]wire.AppRoute{} // Hub 权威推送到达 → 本地临时降级失效
+			c.mu.Unlock()
 			c.fwd.Swap(BuildTable(&push))
 			c.state.LastPush = &push
 			if err := SaveState(c.statePath, c.state); err != nil {
@@ -306,6 +409,37 @@ func (c *Client) connectOnce(ctx context.Context) (healthy bool) {
 				continue
 			}
 			c.buf.Ack(ack.BatchID)
+		case wire.TypeProbeCmd:
+			var cmd wire.ProbeCmd
+			if err := env.Decode(&cmd); err != nil {
+				continue
+			}
+			go func() {
+				res := probe.Run(cctx, cmd.Target, time.Duration(cmd.TimeoutS)*time.Second)
+				res.ProbeID = cmd.ProbeID
+				if out, err := wire.NewEnvelope(wire.TypeProbeResult, res); err == nil {
+					select {
+					case send <- out:
+					case <-cctx.Done():
+					}
+				}
+			}()
+		case wire.TypeSpeedtestCmd:
+			var cmd wire.SpeedtestCmd
+			if err := env.Decode(&cmd); err != nil {
+				continue
+			}
+			go func() {
+				results := probe.RunAll(cctx, cmd.Targets, probe.DefaultTimeout)
+				out, err := wire.NewEnvelope(wire.TypeSpeedtestResult,
+					wire.SpeedtestResult{TestID: cmd.TestID, Results: results})
+				if err == nil {
+					select {
+					case send <- out:
+					case <-cctx.Done():
+					}
+				}
+			}()
 		}
 	}
 }

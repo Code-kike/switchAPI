@@ -156,6 +156,9 @@ func (s *Server) handleProviderUpdate(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// 用户编辑（可能修了 key/地址）→ 健康状态既往不咎（研究/08：needs_attention
+	// 由用户操作解除；冷却一并清除，下次失败重新计）。
+	s.st.ClearProviderHealth(id)
 	// 若更新的是某 App 的当前生效供应商，路由内容变了 → 推送新快照。
 	if s.isActive(id) {
 		s.broadcast()
@@ -274,6 +277,7 @@ func (s *Server) handleSwitch(w http.ResponseWriter, r *http.Request) {
 	}
 	s.event("switch", eventJSON(map[string]string{
 		"app": req.App, "from": from, "to": p.ID, "to_name": p.Name}))
+	s.markDirty()
 	s.broadcast()   // Agent 侧 config_push（内部先 bump config_rev）
 	s.NotifyState() // UI 侧 state_changed（在 broadcast 后取到新 rev）
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "app": req.App, "active": p.ID})
@@ -323,6 +327,7 @@ func (s *Server) handleFallbackPut(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	s.markDirty()
 	s.broadcast() // Agent 缓存备选序列供 M4 本地临时降级使用
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }

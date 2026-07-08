@@ -5,7 +5,7 @@
 import { useEffect } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeftRight, Gauge, LogOut, MonitorSmartphone, ScrollText, Server } from 'lucide-react'
+import { ArrowLeftRight, Gauge, LogOut, MonitorSmartphone, ScrollText, Server, Settings } from 'lucide-react'
 import { apiGet, apiPost } from '@/api/client'
 import type { StateResp } from '@/api/types'
 import { startWs, stopWs } from '@/ws'
@@ -18,6 +18,7 @@ const NAV = [
   { to: '/usage', label: '用量', icon: ArrowLeftRight },
   { to: '/devices', label: '设备', icon: MonitorSmartphone },
   { to: '/events', label: '事件', icon: ScrollText },
+  { to: '/settings', label: '设置', icon: Settings },
 ]
 
 export function Layout() {

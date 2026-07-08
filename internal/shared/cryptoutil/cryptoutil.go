@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"golang.org/x/crypto/argon2"
+	"golang.org/x/crypto/scrypt"
 )
 
 const masterKeyLen = 32
@@ -151,4 +152,39 @@ func Argon2idVerify(password, encoded string) bool {
 	}
 	got := argon2.IDKey([]byte(password), salt, t, m, p, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1
+}
+
+// ---- 口令加密（导出文件用，父 design.md §7）----
+
+// scrypt 参数：N=2^15 交互式强度（导出为低频操作，1s 内可接受）。
+const (
+	ScryptN = 32768
+	ScryptR = 8
+	ScryptP = 1
+)
+
+// SealWithPassphrase derives a 32-byte key from the passphrase (scrypt, fresh
+// random salt) and seals plaintext with AES-256-GCM. Returns (salt, sealed)
+// where sealed is nonce-prefixed like Seal.
+func SealWithPassphrase(passphrase string, plaintext []byte) (salt, sealed []byte, err error) {
+	salt = make([]byte, 16)
+	if _, err = rand.Read(salt); err != nil {
+		return nil, nil, err
+	}
+	key, err := scrypt.Key([]byte(passphrase), salt, ScryptN, ScryptR, ScryptP, 32)
+	if err != nil {
+		return nil, nil, err
+	}
+	sealed, err = Seal(key, plaintext)
+	return salt, sealed, err
+}
+
+// OpenWithPassphrase reverses SealWithPassphrase; a wrong passphrase surfaces
+// as a GCM authentication error.
+func OpenWithPassphrase(passphrase string, salt, sealed []byte) ([]byte, error) {
+	key, err := scrypt.Key([]byte(passphrase), salt, ScryptN, ScryptR, ScryptP, 32)
+	if err != nil {
+		return nil, err
+	}
+	return Open(key, sealed)
 }

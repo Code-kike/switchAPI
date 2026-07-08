@@ -18,8 +18,10 @@ import (
 
 	"github.com/Code-kike/switchAPI/internal/agent/appconfig"
 	"github.com/Code-kike/switchAPI/internal/agent/forward"
+	"github.com/Code-kike/switchAPI/internal/agent/health"
 	"github.com/Code-kike/switchAPI/internal/agent/hubclient"
 	"github.com/Code-kike/switchAPI/internal/agent/usagebuf"
+	"github.com/Code-kike/switchAPI/internal/shared/wire"
 	"github.com/kardianos/service"
 )
 
@@ -174,16 +176,28 @@ func (p *program) Start(_ service.Service) error {
 	// Usage buffer: parsed usage is enqueued here (non-blocking) and pumped to
 	// the Hub by the client. If it can't be opened, forwarding still proceeds —
 	// usage reporting is best-effort relative to the proxy staying up.
+	// 健康判定（M4）挂在同一 sink 链上：每条记录同时喂给 health.Tracker，
+	// 达阈值经 client 上报（断连时本地临时降级）。
+	var client *hubclient.Client
+	tracker := health.New(health.DefaultConfig(), func(r wire.HealthReport) {
+		if client != nil {
+			client.ReportHealth(r)
+		}
+	})
 	var sink forward.UsageSink
 	if buf, err := usagebuf.Open(p.dbPath); err != nil {
 		log.Printf("usagebuf 打开失败，用量上报本次禁用: %v", err)
+		sink = tracker.Observe
 	} else {
 		p.buf = buf
-		sink = func(u forward.Usage) { buf.Enqueue(u.ToRecord()) }
+		sink = func(u forward.Usage) {
+			buf.Enqueue(u.ToRecord())
+			tracker.Observe(u)
+		}
 	}
 
 	fwd := forward.New(p.state.LocalToken, sink)
-	client := hubclient.New(p.statePath, p.state, fwd)
+	client = hubclient.New(p.statePath, p.state, fwd)
 	if p.buf != nil {
 		client.UseQueue(p.buf)
 	}

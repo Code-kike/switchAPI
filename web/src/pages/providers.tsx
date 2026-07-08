@@ -23,6 +23,7 @@ import {
   type Preset,
   type Protocol,
   type Provider,
+  type ProviderHealth,
   type StateResp,
 } from '@/api/types'
 import { Badge } from '@/components/ui/badge'
@@ -365,6 +366,12 @@ export default function ProvidersPage() {
   })
   const presets = useQuery({ queryKey: ['presets'], queryFn: () => apiGet<Preset[]>('/api/v1/presets') })
   const state = useQuery({ queryKey: ['state'], queryFn: () => apiGet<StateResp>('/api/v1/state') })
+  const health = useQuery({
+    queryKey: ['health'],
+    queryFn: () => apiGet<ProviderHealth[]>('/api/v1/health'),
+    refetchInterval: 30_000,
+  })
+  const healthOf = (id: string) => (health.data ?? []).find((h) => h.provider_id === id)
 
   const activeIDs = new Set(
     APPS.map((a) => state.data?.[a]?.active_provider_id).filter(Boolean) as string[],
@@ -417,6 +424,15 @@ export default function ProvidersPage() {
                         生效中
                       </Badge>
                     )}
+                    {(() => {
+                      const h = healthOf(p.id)
+                      const now = Math.floor(Date.now() / 1000)
+                      if (h?.needs_attention)
+                        return <Badge className="ml-2" variant="destructive" title="鉴权连续失败（401/403），请检查 API key">需要关注</Badge>
+                      if (h && h.cooldown_until > now)
+                        return <Badge className="ml-2" variant="outline" title={`故障冷却中，${Math.ceil((h.cooldown_until - now) / 60)} 分钟后可被自动选中`}>冷却中</Badge>
+                      return null
+                    })()}
                   </TableCell>
                   <TableCell>
                     <Badge variant="outline">{p.protocol}</Badge>

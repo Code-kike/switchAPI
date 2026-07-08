@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Code-kike/switchAPI/internal/hub/backup"
+	"github.com/Code-kike/switchAPI/internal/hub/failover"
 	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
 	"github.com/Code-kike/switchAPI/internal/shared/cryptoutil"
@@ -40,6 +42,9 @@ type Server struct {
 	pairings map[string]time.Time // one-time code → expiry
 
 	ui uiHub // ws/ui 实时下行通道（uiws.go）
+
+	reliability *failover.Engine // 可选：测速/健康（reliability.go，测试可 nil）
+	backups     *backup.Manager  // 可选：快照（export.go，测试可 nil）
 }
 
 // New wires all routes. agents and pricer may be nil in tests.
@@ -72,6 +77,15 @@ func New(st *store.Store, masterKey []byte, agents AgentChannel, pricer *pricing
 	m.HandleFunc("GET /api/v1/stats/trend", s.handleStatsTrend)
 	m.HandleFunc("GET /api/v1/stats/breakdown", s.handleStatsBreakdown)
 	m.HandleFunc("GET /api/v1/ws/ui", s.handleUIWS) // 受 session 中间件保护
+	m.HandleFunc("GET /api/v1/health", s.handleHealth)
+	m.HandleFunc("POST /api/v1/speedtest", s.handleSpeedtest)
+	m.HandleFunc("GET /api/v1/speedtest/latest", s.handleSpeedtestLatest)
+	m.HandleFunc("POST /api/v1/backup/run", s.handleBackupRun)
+	m.HandleFunc("GET /api/v1/backups", s.handleBackupList)
+	m.HandleFunc("POST /api/v1/export", s.handleExport)
+	m.HandleFunc("POST /api/v1/import", s.handleImport)
+	m.HandleFunc("POST /api/v1/import/cc-switch", s.handleImportCCSwitch)
+	m.HandleFunc("GET /api/v1/usage/export.csv", s.handleUsageCSV)
 	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("ok"))

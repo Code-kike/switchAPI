@@ -74,7 +74,10 @@ type AppRoute struct {
 type ConfigPush struct {
 	Rev            int64               `json:"rev"`
 	Apps           map[string]AppRoute `json:"apps"`            // key: "claude-code" | "codex"
-	FallbackOrders map[string][]string `json:"fallback_orders"` // app → provider ids（M4 本地临时降级用）
+	FallbackOrders map[string][]string `json:"fallback_orders"` // app → provider ids（顺序即优先级）
+	// FallbackRoutes 是备选序列的完整路由（含解密 key，LAN-trust 同 Apps）——
+	// M4 本地临时降级的前提：Hub 断连时 Agent 才能自行切到下一候选。
+	FallbackRoutes map[string][]AppRoute `json:"fallback_routes,omitempty"`
 }
 
 // UsageRecord is one metered request as the Agent reports it — pure metadata,

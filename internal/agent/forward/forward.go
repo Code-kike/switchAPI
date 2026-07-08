@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -105,6 +106,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		app:       app,
 		start:     time.Now(),
 		billing:   r.Method == http.MethodPost && isBillingPath(up.Protocol, rest),
+		reqCtx:    r.Context(),
 	}
 	if rest == "" {
 		rest = "/"
@@ -112,7 +114,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// The proxy's Rewrite reads the decision from the context; the prefix is
 	// stripped here so SetURL's path join sees only the provider-relative path.
-	r2 := r.Clone(context.WithValue(r.Context(), decisionKey{}, d))
+	ctx := r.Context()
+	if d.billing {
+		// 计费请求可被超时看门狗取消（研究#8 四类超时，M4）；watchdog 在
+		// Rewrite（流式判定后）与 tee（流中静默）里布防。
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(ctx)
+		d.cancelUpstream = cancel
+		defer d.stopTimers() // 请求生命周期结束，兜底回收计时器
+	}
+	r2 := r.Clone(context.WithValue(ctx, decisionKey{}, d))
 	r2.URL.Path = rest
 	r2.URL.RawPath = ""
 	s.proxy.ServeHTTP(w, r2)
@@ -166,6 +177,98 @@ type decision struct {
 	// target ("to"), set only when a redirect actually applied.
 	reqModel   string
 	redirModel string
+
+	// M4 超时看门狗（研究/08 参数 #4/#5/#6）。stream 只在请求体解析成功后
+	// 置位（未知形态不布防——宁可保持 M1 语义也不误杀合法慢请求）。
+	stream         bool
+	reqCtx         context.Context    // inbound ctx（客户端断开判定）
+	cancelUpstream context.CancelFunc // 仅计费请求非 nil
+
+	tmu         sync.Mutex
+	timeoutKind string
+	headerTimer *time.Timer
+	idleTimer   *time.Timer
+	recorded    bool // 该请求是否已吐过 usage 记录（ErrorHandler/tee 二选一）
+}
+
+// setTimeoutKind records why a watchdog fired (first one wins).
+func (d *decision) setTimeoutKind(kind string) {
+	d.tmu.Lock()
+	if d.timeoutKind == "" {
+		d.timeoutKind = kind
+	}
+	d.tmu.Unlock()
+}
+
+func (d *decision) getTimeoutKind() string {
+	d.tmu.Lock()
+	defer d.tmu.Unlock()
+	return d.timeoutKind
+}
+
+// markRecorded returns true exactly once — the emit-usage permission slip.
+func (d *decision) markRecorded() bool {
+	d.tmu.Lock()
+	defer d.tmu.Unlock()
+	if d.recorded {
+		return false
+	}
+	d.recorded = true
+	return true
+}
+
+func (d *decision) armHeaderTimer(timeout time.Duration, kind string) {
+	if d.cancelUpstream == nil {
+		return
+	}
+	d.tmu.Lock()
+	d.headerTimer = time.AfterFunc(timeout, func() {
+		d.setTimeoutKind(kind)
+		d.cancelUpstream()
+	})
+	d.tmu.Unlock()
+}
+
+func (d *decision) armIdleTimer(timeout time.Duration) *time.Timer {
+	if d.cancelUpstream == nil {
+		return nil
+	}
+	t := time.AfterFunc(timeout, func() {
+		d.setTimeoutKind("timeout_idle")
+		d.cancelUpstream()
+	})
+	d.tmu.Lock()
+	d.idleTimer = t
+	d.tmu.Unlock()
+	return t
+}
+
+func (d *decision) stopHeaderTimer() {
+	d.tmu.Lock()
+	if d.headerTimer != nil {
+		d.headerTimer.Stop()
+		d.headerTimer = nil
+	}
+	d.tmu.Unlock()
+}
+
+func (d *decision) stopTimers() {
+	d.tmu.Lock()
+	if d.headerTimer != nil {
+		d.headerTimer.Stop()
+		d.headerTimer = nil
+	}
+	if d.idleTimer != nil {
+		d.idleTimer.Stop()
+		d.idleTimer = nil
+	}
+	d.tmu.Unlock()
+}
+
+// clientGone reports whether the inbound client already went away (its
+// context died and no watchdog was the cause).
+func (d *decision) clientGone() bool {
+	return d.reqCtx != nil && d.reqCtx.Err() != nil && d.getTimeoutKind() == ""
 }
 
 // recordModel picks the model to record: the client-requested model when known,

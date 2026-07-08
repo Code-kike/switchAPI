@@ -74,6 +74,7 @@ type parsedUsage struct {
 	CacheRead  int64
 	Done       bool // reached a terminal wire event
 	SawTokens  bool // at least one token field was present → usage_source=wire
+	SawError   bool // provider signalled failure inside a 2xx stream (fake-200, research/08)
 	HighWater  int
 }
 
@@ -92,6 +93,7 @@ type usageTee struct {
 	stream   bool // SSE (vs buffered JSON) — gates the stream_aborted classification
 	sink     UsageSink
 	finished bool
+	idle     *time.Timer // 流中静默看门狗（研究/08 #5，仅流式计费响应）
 }
 
 func newStreamTee(rc io.ReadCloser, status int, d *decision, sink UsageSink) *usageTee {
@@ -99,8 +101,10 @@ func newStreamTee(rc io.ReadCloser, status int, d *decision, sink UsageSink) *us
 	if d.up.Protocol == "openai" {
 		cap = maxOpenAILine // response.completed embeds the whole output on one line
 	}
-	return &usageTee{rc: rc, parser: &sseParser{proto: d.up.Protocol, lineCap: cap},
+	t := &usageTee{rc: rc, parser: &sseParser{proto: d.up.Protocol, lineCap: cap},
 		d: d, status: status, stream: true, sink: sink}
+	t.idle = d.armIdleTimer(streamIdleTimeout) // nil for non-billing/unarmed decisions
+	return t
 }
 
 func newJSONTee(rc io.ReadCloser, status int, d *decision, sink UsageSink, parse bool) *usageTee {
@@ -112,6 +116,9 @@ func (t *usageTee) Read(p []byte) (int, error) {
 	n, err := t.rc.Read(p)
 	if n > 0 {
 		t.parser.feed(p[:n]) // never blocks, never mutates p
+		if t.idle != nil {
+			t.idle.Reset(streamIdleTimeout)
+		}
 	}
 	if err == io.EOF {
 		t.finish()
@@ -133,6 +140,7 @@ func (t *usageTee) finish() {
 		return
 	}
 	t.finished = true
+	t.d.stopTimers()
 	t.parser.done()
 	pu := t.parser.result()
 
@@ -157,11 +165,28 @@ func (t *usageTee) finish() {
 	} else {
 		u.UsageSource = "none"
 	}
+	// 错误细分（研究/08 失败分类的观测输入；健康计数在 health 包做）。
 	switch {
+	case t.status == 429:
+		u.ErrorKind = "http_429"
+	case t.status == 401 || t.status == 403:
+		u.ErrorKind = "http_auth"
 	case t.status >= 500:
 		u.ErrorKind = "upstream_5xx"
+	case pu.SawError:
+		u.ErrorKind = "fake_200" // 2xx 外壳、流内以 error/failed 终止
 	case t.stream && !pu.Done:
-		u.ErrorKind = "stream_aborted" // stream died before its terminal event
+		switch {
+		case t.d.getTimeoutKind() != "":
+			u.ErrorKind = t.d.getTimeoutKind() // timeout_idle（看门狗掐断）
+		case t.d.clientGone():
+			u.ErrorKind = "client_abort" // 客户端主动断开：记录但不计入健康
+		default:
+			u.ErrorKind = "stream_aborted" // 上游在终止事件前断流
+		}
+	}
+	if !t.d.markRecorded() {
+		return // ErrorHandler 已为该请求记账（理论不可达，防御双记）
 	}
 	if t.sink != nil {
 		t.sink(u)
@@ -276,6 +301,8 @@ func (s *sseParser) handleAnthropic(data []byte) {
 		}
 	case "message_stop":
 		s.acc.Done = true
+	case "error":
+		s.acc.SawError = true // anthropic fake-200：2xx 流内 error 事件
 	}
 }
 
@@ -302,6 +329,9 @@ func (s *sseParser) handleOpenAI(data []byte) {
 			applyUsage(&s.acc, "openai", p.Response.Usage)
 		}
 		s.acc.Done = true // reached a terminal event → not a mid-stream abort
+		if p.Type == "response.failed" {
+			s.acc.SawError = true // openai fake-200（incomplete 是截断非故障）
+		}
 	}
 }
 

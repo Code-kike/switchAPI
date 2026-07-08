@@ -45,14 +45,18 @@
 - [x] Docker 镜像 + hub 部署文档；桌面打包配置齐备（bundle 三目标 + externalBin）
 - 验证：e2e 双 ws/ui 客户端 1s 内可见切换与新用量（自动化）；手机浏览器+桌面壳同开实测待两机部署
 
-## M4 — 可靠性与迁移
+## M4 — 可靠性与迁移 ✅ 完成（2026-07-08，子任务 07-08-m4-reliability-migration）
 
-- [ ] 故障自动切换全链路（健康判定/防抖阈值（研究#8）→ Hub 裁决 → 全局切换 → 双端通知）
-- [ ] 端点测速（广播指令→各 Agent 自测→按设备展示）
-- [ ] 备份快照轮转 + 口令加密导出/导入 + CSV 用量导出
-- [ ] cc-switch 一键导入（研究#5）
-- [ ] 桌面通知/托盘状态联动；事件时间线补全
-- 验证：逐项跑 prd.md 第 5 节全部验收标准，全绿后本任务 finish
+- [x] 故障自动切换全链路（Agent 四分类健康判定 + 四类超时 → health_report → Hub 负证据否决仲裁 →
+  沿备选序列切换（冷却指数退避）→ failover 事件 + Agent 推送 + ws/ui toast → 恢复探测不自动切回；
+  Hub 断连时本地临时降级）
+- [x] 端点测速（POST /speedtest 广播 → 各 Agent 最小补全自测 → 设备页按设备展示）
+- [x] 备份快照轮转（daily + 变更防抖 VACUUM INTO，留 10）+ scrypt+AES-GCM 口令加密导出/导入
+  （明文需二次确认）+ CSV 用量导出
+- [x] cc-switch 一键导入（上传 db/v2 json → 映射表逐行导入 + E1-E9 跳过报告）
+- [x] 双端通知走同一 SPA 的 ws toast（桌面壳装载 Hub 页面即同享）；事件时间线含
+  failover/probe/speedtest/backup
+- 验证：M4 e2e 全链路自动化通过；prd.md §5 两机实机清单待部署后人工执行
 
 ## 任务组织建议
 

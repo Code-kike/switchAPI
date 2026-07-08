@@ -259,10 +259,10 @@ func TestModelsGetNoRecord(t *testing.T) {
 	}
 }
 
-// Mid-stream abort on an anthropic stream: message_start seen (tokens on the
-// wire) but no message_stop → partial record, ErrorKind=stream_aborted,
-// UsageSource=wire (research/03 C7).
-func TestAnthropicMidStreamAbort(t *testing.T) {
+// Client hangs up mid-stream: message_start seen (tokens on the wire) but no
+// message_stop → partial record with ErrorKind=client_abort（M4：客户端主动
+// 中断记录在案但不计入健康，research/08 失败分类）。
+func TestAnthropicClientAbortMidStream(t *testing.T) {
 	// Upstream sends message_start then blocks until the client goes away.
 	gone := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -297,11 +297,46 @@ func TestAnthropicMidStreamAbort(t *testing.T) {
 	if u.Done {
 		t.Errorf("partial stream reported Done=true: %+v", u)
 	}
-	if u.ErrorKind != "stream_aborted" {
-		t.Errorf("errkind = %q, want stream_aborted", u.ErrorKind)
+	if u.ErrorKind != "client_abort" {
+		t.Errorf("errkind = %q, want client_abort", u.ErrorKind)
 	}
 	if u.InputTokens != 77 || u.UsageSource != "wire" {
 		t.Errorf("partial usage = %+v, want input=77 source=wire", u)
 	}
 	<-gone
+}
+
+// Upstream dies mid-stream while the client is still reading → the classic
+// stream_aborted：终止事件未达而上游 EOF（research/03 C7 + research/08 #19）。
+func TestAnthropicUpstreamDiedMidStream(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"model":"m","usage":{"input_tokens":9,"output_tokens":1}}}`+"\n\n")
+		http.NewResponseController(w).Flush()
+		// 直接返回：连接被服务器关闭，客户端在等下一事件时读到 EOF。
+	}))
+	t.Cleanup(srv.Close)
+	_, fwdSrv, ch := fwdTo(t, srv, "anthropic")
+
+	req, _ := http.NewRequest("POST", fwdSrv.URL+"/anthropic/v1/messages",
+		strings.NewReader(`{"model":"m","stream":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+localToken)
+	resp, err := rawClient().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body) // 读到上游 EOF
+	resp.Body.Close()
+
+	u := waitUsage(t, ch)
+	if u.ErrorKind != "stream_aborted" || u.Done {
+		t.Errorf("errkind = %q done=%v, want stream_aborted/false", u.ErrorKind, u.Done)
+	}
+	if u.InputTokens != 9 || u.UsageSource != "wire" {
+		t.Errorf("partial usage = %+v, want input=9 source=wire", u)
+	}
 }

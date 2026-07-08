@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/Code-kike/switchAPI/internal/hub/api"
+	"github.com/Code-kike/switchAPI/internal/hub/backup"
+	"github.com/Code-kike/switchAPI/internal/hub/failover"
 	"github.com/Code-kike/switchAPI/internal/hub/pricing"
 	"github.com/Code-kike/switchAPI/internal/hub/realtime"
 	"github.com/Code-kike/switchAPI/internal/hub/store"
@@ -83,6 +85,17 @@ func run(listen, dataDir string) error {
 	rt := realtime.New(st, masterKey)
 	apiSrv := api.New(st, masterKey, rt, resolver)
 	rt.SetUsageNotifier(apiSrv) // 用量入库 → ws/ui usage_tick
+
+	// 故障切换仲裁 + 恢复探测 + 测速（M4）。
+	engine := failover.New(st, masterKey, rt, apiSrv, failover.DefaultConfig())
+	rt.SetReportHandler(engine)
+	apiSrv.SetReliability(engine)
+	go engine.Run(ctx)
+
+	// 备份快照：每日 + 结构性变更防抖（M4，父 design.md §7）。
+	bk := backup.New(st, filepath.Join(dataDir, "backups"))
+	apiSrv.SetBackup(bk)
+	go bk.Run(ctx)
 
 	root := http.NewServeMux()
 	root.Handle("GET /api/v1/ws/agent", rt.Handler())
